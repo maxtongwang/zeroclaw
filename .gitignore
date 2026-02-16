@@ -5,3 +5,10 @@ firmware/*/target
 .DS_Store
 .wt-pr37/
 .env
+
+# Python virtual environments
+.venv/
+venv/
+
+# ESP32 build cache (esp-idf-sys managed)
+.embuild/
