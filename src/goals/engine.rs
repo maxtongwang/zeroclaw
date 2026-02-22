@@ -274,10 +274,9 @@ impl GoalEngine {
             .filter(|(_, g)| g.status == GoalStatus::InProgress)
             .filter(|(_, g)| {
                 !g.steps.is_empty()
-                    && !g
-                        .steps
-                        .iter()
-                        .any(|s| s.status == StepStatus::Pending && s.attempts < MAX_STEP_ATTEMPTS)
+                    && !g.steps.iter().any(|s| {
+                        s.status == StepStatus::Pending && s.attempts < MAX_STEP_ATTEMPTS
+                    })
             })
             .map(|(i, _)| i)
             .collect()
@@ -290,7 +289,11 @@ impl GoalEngine {
     pub fn build_reflection_prompt(goal: &Goal) -> String {
         let mut prompt = String::new();
 
-        let _ = writeln!(prompt, "[Goal Reflection] Goal: {}\n", goal.description);
+        let _ = writeln!(
+            prompt,
+            "[Goal Reflection] Goal: {}\n",
+            goal.description
+        );
 
         prompt.push_str("All steps have been attempted. Here is the current state:\n\n");
 
@@ -326,6 +329,7 @@ impl GoalEngine {
 
         prompt
     }
+
 }
 
 #[cfg(test)]
@@ -400,7 +404,7 @@ max_steps_per_cycle = 5
 channel = "lark"
 target = "oc_test"
 "#;
-        let config: crate::config::schema::GoalLoopConfig = toml::from_str(toml_str).unwrap();
+        let config: crate::config::GoalLoopConfig = toml::from_str(toml_str).unwrap();
         assert!(config.enabled);
         assert_eq!(config.interval_minutes, 15);
         assert_eq!(config.step_timeout_secs, 180);
@@ -411,7 +415,7 @@ target = "oc_test"
 
     #[test]
     fn goal_loop_config_defaults() {
-        let config = crate::config::schema::GoalLoopConfig::default();
+        let config = crate::config::GoalLoopConfig::default();
         assert!(!config.enabled);
         assert_eq!(config.interval_minutes, 10);
         assert_eq!(config.step_timeout_secs, 120);
@@ -666,13 +670,7 @@ target = "oc_test"
 
     #[test]
     fn goal_status_self_healing_unknown_variants() {
-        for variant in &[
-            "\"unknown\"",
-            "\"invalid\"",
-            "\"PENDING\"",
-            "\"IN_PROGRESS\"",
-            "\"\"",
-        ] {
+        for variant in &["\"unknown\"", "\"invalid\"", "\"PENDING\"", "\"IN_PROGRESS\"", "\"\""] {
             let parsed: GoalStatus =
                 serde_json::from_str(variant).unwrap_or_else(|e| panic!("{variant}: {e}"));
             assert_eq!(parsed, GoalStatus::Pending);
