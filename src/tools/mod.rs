@@ -421,6 +421,18 @@ pub fn all_tools_with_runtime(
         }
     }
 
+    // Add declared plugin tools from the active plugin registry.
+    if config.plugins.enabled {
+        let registry = plugins::runtime::current_registry();
+        for tool in registry.tools() {
+            tool_arcs.push(Arc::new(PluginManifestTool::new(ToolSpec {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                parameters: tool.parameters.clone(),
+            })));
+        }
+    }
+
     boxed_registry_from_arcs(tool_arcs)
 }
 
