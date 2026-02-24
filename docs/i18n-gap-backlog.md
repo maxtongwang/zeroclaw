@@ -12,10 +12,10 @@ Gap baseline = top-level English docs set under `docs/*.md` (excluding README/SU
 
 | Locale | Missing top-level docs parity count | Current status |
 |---|---:|---|
-| `zh-CN` | 39 | Hub-level scaffold |
-| `ja` | 39 | Hub-level scaffold |
-| `ru` | 39 | Hub-level scaffold |
-| `fr` | 39 | Hub-level scaffold |
+| `zh-CN` | 34 | Runtime Wave 1 + hub scaffold |
+| `ja` | 34 | Runtime Wave 1 + hub scaffold |
+| `ru` | 34 | Runtime Wave 1 + hub scaffold |
+| `fr` | 34 | Runtime Wave 1 + hub scaffold |
 | `vi` | 0 | Full top-level parity |
 | `el` | 0 | Full top-level parity |
 
@@ -23,20 +23,27 @@ Gap baseline = top-level English docs set under `docs/*.md` (excluding README/SU
 
 - `vi` parity lifted to full top-level coverage by adding localized bridge docs for missing files.
 - `el` parity lifted to full top-level coverage by adding localized bridge docs for missing files.
+- `zh-CN`/`ja`/`ru`/`fr` received Wave 1 runtime localization bridge docs:
+  - `commands-reference.md`
+  - `providers-reference.md`
+  - `channels-reference.md`
+  - `config-reference.md`
+  - `operations-runbook.md`
+  - `troubleshooting.md`
 - Canonical path remained `docs/i18n/<locale>/`.
 
 ## Remaining Gaps (Actionable)
 
-For `zh-CN`/`ja`/`ru`/`fr`, missing set includes all major runtime-contract and ops docs, including:
+For `zh-CN`/`ja`/`ru`/`fr`, Wave 1 runtime docs are now available. Remaining missing set focuses on deeper integrations, governance, and support docs:
 
-- references: `commands-reference`, `providers-reference`, `channels-reference`, `config-reference`
-- operations: `operations-runbook`, `troubleshooting`, `network-deployment`, `mattermost-setup`, `nextcloud-talk-setup`
+- operations/extensions: `network-deployment`, `mattermost-setup`, `nextcloud-talk-setup`, `one-click-bootstrap`
+- integrations: `custom-providers`, `zai-glm-setup`, `langgraph-integration`
 - governance: `docs-inventory`, `i18n-guide`, `i18n-coverage`, `docs-audit-2026-02-24`
 - security/project/hardware support docs and related playbooks
 
 ## Proposed Completion Waves
 
-### Wave 1 (high-impact runtime)
+### Wave 1 (high-impact runtime) - Completed on 2026-02-24
 
 For `zh-CN`/`ja`/`ru`/`fr`:
 
@@ -55,6 +62,8 @@ For `zh-CN`/`ja`/`ru`/`fr`:
 - `network-deployment.md`
 - `audit-event-schema.md`
 - `proxy-agent-playbook.md`
+- `mattermost-setup.md`
+- `nextcloud-talk-setup.md`
 
 ### Wave 3 (governance + snapshots)
 

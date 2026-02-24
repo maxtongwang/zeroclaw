@@ -20,3 +20,12 @@ Dernière mise à jour : **24 février 2026**.
 - Sécurité : [../../security/README.md](../../security/README.md)
 - Matériel : [../../hardware/README.md](../../hardware/README.md)
 - Contribution / CI : [../../contributing/README.md](../../contributing/README.md)
+
+## Documents runtime Wave 1
+
+- Référence des commandes : [commands-reference.md](commands-reference.md)
+- Référence des providers : [providers-reference.md](providers-reference.md)
+- Référence des canaux : [channels-reference.md](channels-reference.md)
+- Référence de configuration : [config-reference.md](config-reference.md)
+- Runbook d'exploitation : [operations-runbook.md](operations-runbook.md)
+- Dépannage : [troubleshooting.md](troubleshooting.md)

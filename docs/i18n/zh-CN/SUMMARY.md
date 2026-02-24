@@ -20,3 +20,12 @@
 - 安全：[../../security/README.md](../../security/README.md)
 - 硬件：[../../hardware/README.md](../../hardware/README.md)
 - 贡献与 CI：[../../contributing/README.md](../../contributing/README.md)
+
+## Wave 1 运行时文档
+
+- 命令参考：[commands-reference.md](commands-reference.md)
+- Provider 参考：[providers-reference.md](providers-reference.md)
+- Channel 参考：[channels-reference.md](channels-reference.md)
+- 配置参考：[config-reference.md](config-reference.md)
+- 运维 Runbook：[operations-runbook.md](operations-runbook.md)
+- 故障排查：[troubleshooting.md](troubleshooting.md)

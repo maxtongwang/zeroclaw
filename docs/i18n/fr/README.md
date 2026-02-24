@@ -13,6 +13,15 @@ Dernière mise à jour : **24 février 2026**.
 - Sommaire français (compatibilité) : [../../SUMMARY.fr.md](../../SUMMARY.fr.md)
 - Hub docs anglais : [../../README.md](../../README.md)
 
+## Documents runtime Wave 1
+
+- Référence des commandes : [commands-reference.md](commands-reference.md)
+- Référence des providers : [providers-reference.md](providers-reference.md)
+- Référence des canaux : [channels-reference.md](channels-reference.md)
+- Référence de configuration : [config-reference.md](config-reference.md)
+- Runbook d'exploitation : [operations-runbook.md](operations-runbook.md)
+- Dépannage : [troubleshooting.md](troubleshooting.md)
+
 ## Catégories
 
 - Démarrage : [../../getting-started/README.md](../../getting-started/README.md)

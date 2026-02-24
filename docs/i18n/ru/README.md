@@ -13,6 +13,15 @@
 - Русский SUMMARY (совместимость): [../../SUMMARY.ru.md](../../SUMMARY.ru.md)
 - English docs hub: [../../README.md](../../README.md)
 
+## Документы Wave 1 (рантайм)
+
+- Справочник команд: [commands-reference.md](commands-reference.md)
+- Справочник провайдеров: [providers-reference.md](providers-reference.md)
+- Справочник каналов: [channels-reference.md](channels-reference.md)
+- Справочник конфигурации: [config-reference.md](config-reference.md)
+- Операционный runbook: [operations-runbook.md](operations-runbook.md)
+- Troubleshooting: [troubleshooting.md](troubleshooting.md)
+
 ## Категории
 
 - Начало работы: [../../getting-started/README.md](../../getting-started/README.md)

@@ -24,12 +24,25 @@ Use these i18n paths:
 | Locale | Root README | Canonical Docs Hub | Commands Ref | Config Ref | Troubleshooting | Status |
 |---|---|---|---|---|---|---|
 | `en` | `README.md` | `docs/README.md` | `docs/commands-reference.md` | `docs/config-reference.md` | `docs/troubleshooting.md` | Source of truth |
-| `zh-CN` | `README.zh-CN.md` | `docs/i18n/zh-CN/README.md` | - | - | - | Hub-level localized (i18n scaffold) |
-| `ja` | `README.ja.md` | `docs/i18n/ja/README.md` | - | - | - | Hub-level localized (i18n scaffold) |
-| `ru` | `README.ru.md` | `docs/i18n/ru/README.md` | - | - | - | Hub-level localized (i18n scaffold) |
-| `fr` | `README.fr.md` | `docs/i18n/fr/README.md` | - | - | - | Hub-level localized (i18n scaffold) |
+| `zh-CN` | `README.zh-CN.md` | `docs/i18n/zh-CN/README.md` | `docs/i18n/zh-CN/commands-reference.md` | `docs/i18n/zh-CN/config-reference.md` | `docs/i18n/zh-CN/troubleshooting.md` | Runtime Wave 1 localized + hub scaffold |
+| `ja` | `README.ja.md` | `docs/i18n/ja/README.md` | `docs/i18n/ja/commands-reference.md` | `docs/i18n/ja/config-reference.md` | `docs/i18n/ja/troubleshooting.md` | Runtime Wave 1 localized + hub scaffold |
+| `ru` | `README.ru.md` | `docs/i18n/ru/README.md` | `docs/i18n/ru/commands-reference.md` | `docs/i18n/ru/config-reference.md` | `docs/i18n/ru/troubleshooting.md` | Runtime Wave 1 localized + hub scaffold |
+| `fr` | `README.fr.md` | `docs/i18n/fr/README.md` | `docs/i18n/fr/commands-reference.md` | `docs/i18n/fr/config-reference.md` | `docs/i18n/fr/troubleshooting.md` | Runtime Wave 1 localized + hub scaffold |
 | `vi` | `README.vi.md` | `docs/i18n/vi/README.md` | `docs/i18n/vi/commands-reference.md` | `docs/i18n/vi/config-reference.md` | `docs/i18n/vi/troubleshooting.md` | Full tree localized |
 | `el` | `README.el.md` | `docs/i18n/el/README.md` | `docs/i18n/el/commands-reference.md` | `docs/i18n/el/config-reference.md` | `docs/i18n/el/troubleshooting.md` | Full tree localized |
+
+## Top-Level Parity Snapshot
+
+Baseline on 2026-02-24 uses 40 top-level English docs (`docs/*.md`, locale root variants excluded).
+
+| Locale | Missing top-level parity count |
+|---|---:|
+| `zh-CN` | 34 |
+| `ja` | 34 |
+| `ru` | 34 |
+| `fr` | 34 |
+| `vi` | 0 |
+| `el` | 0 |
 
 ## Root README Completeness
 
@@ -47,7 +60,7 @@ Not all root READMEs are full translations of `README.md`:
 
 Hub-style entry points provide quick-start orientation and language navigation but do not replicate the full English README content. This is an accurate status record, not a gap to be immediately resolved.
 
-For `zh-CN`, `ja`, `ru`, and `fr`, canonical i18n directory hubs now exist and link back to docs-root compatibility shims during migration.
+For `zh-CN`, `ja`, `ru`, and `fr`, canonical i18n directory hubs now exist, runtime Wave 1 pages are localized, and hubs link back to docs-root compatibility shims during migration.
 
 ## Collection Index i18n
 

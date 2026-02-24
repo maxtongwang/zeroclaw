@@ -13,6 +13,15 @@
 - 中文目录（兼容路径）：[../../SUMMARY.zh-CN.md](../../SUMMARY.zh-CN.md)
 - 英文文档入口：[../../README.md](../../README.md)
 
+## Wave 1 本地化运行时文档
+
+- 命令参考：[commands-reference.md](commands-reference.md)
+- Provider 参考：[providers-reference.md](providers-reference.md)
+- Channel 参考：[channels-reference.md](channels-reference.md)
+- 配置参考：[config-reference.md](config-reference.md)
+- 运维 Runbook：[operations-runbook.md](operations-runbook.md)
+- 故障排查：[troubleshooting.md](troubleshooting.md)
+
 ## 按分类浏览
 
 - 快速入门：[../../getting-started/README.md](../../getting-started/README.md)

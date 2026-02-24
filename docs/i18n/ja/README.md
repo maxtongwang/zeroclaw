@@ -13,6 +13,15 @@
 - 日本語目次（互換）: [../../SUMMARY.ja.md](../../SUMMARY.ja.md)
 - 英語ドキュメント入口: [../../README.md](../../README.md)
 
+## Wave 1 ローカライズ済みランタイム文書
+
+- コマンドリファレンス: [commands-reference.md](commands-reference.md)
+- Provider リファレンス: [providers-reference.md](providers-reference.md)
+- チャネルリファレンス: [channels-reference.md](channels-reference.md)
+- 設定リファレンス: [config-reference.md](config-reference.md)
+- 運用ランブック: [operations-runbook.md](operations-runbook.md)
+- トラブルシューティング: [troubleshooting.md](troubleshooting.md)
+
 ## カテゴリ
 
 - はじめに: [../../getting-started/README.md](../../getting-started/README.md)

@@ -20,3 +20,12 @@
 - Безопасность: [../../security/README.md](../../security/README.md)
 - Аппаратная часть: [../../hardware/README.md](../../hardware/README.md)
 - Вклад и CI: [../../contributing/README.md](../../contributing/README.md)
+
+## Документы Wave 1 (рантайм)
+
+- Справочник команд: [commands-reference.md](commands-reference.md)
+- Справочник провайдеров: [providers-reference.md](providers-reference.md)
+- Справочник каналов: [channels-reference.md](channels-reference.md)
+- Справочник конфигурации: [config-reference.md](config-reference.md)
+- Операционный runbook: [operations-runbook.md](operations-runbook.md)
+- Troubleshooting: [troubleshooting.md](troubleshooting.md)
