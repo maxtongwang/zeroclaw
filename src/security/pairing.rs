@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Maximum failed pairing attempts before lockout.
 const MAX_PAIR_ATTEMPTS: u32 = 5;
@@ -20,24 +20,18 @@ const MAX_PAIR_ATTEMPTS: u32 = 5;
 const PAIR_LOCKOUT_SECS: u64 = 300; // 5 minutes
 /// Maximum number of tracked client entries to bound memory usage.
 const MAX_TRACKED_CLIENTS: usize = 10_000;
-/// How long to retain inactive client entries before pruning.
-const FAILED_ATTEMPT_RETENTION_SECS: u64 = 15 * 60; // 15 minutes
-/// How often failed-attempt state pruning runs.
-const FAILED_ATTEMPT_SWEEP_INTERVAL_SECS: u64 = 5 * 60; // 5 minutes
+/// Retention period for failed-attempt entries with no activity.
+const FAILED_ATTEMPT_RETENTION_SECS: u64 = 900; // 15 min
+/// Minimum interval between full sweeps of the failed-attempt map.
+const FAILED_ATTEMPT_SWEEP_INTERVAL_SECS: u64 = 300; // 5 min
 
-/// Per-client failed-attempt state used for brute-force protection.
+/// Per-client failed attempt state with optional absolute lockout deadline.
 #[derive(Debug, Clone, Copy)]
 struct FailedAttemptState {
-    /// Failed attempts count for the client.
     count: u32,
-    /// Absolute lockout expiry (if currently lockout-eligible).
     lockout_until: Option<Instant>,
-    /// Timestamp of the latest activity for retention pruning / LRU.
     last_attempt: Instant,
 }
-
-/// Per-client failed attempt tracking map.
-type FailedAttempts = HashMap<String, FailedAttemptState>;
 
 /// Manages pairing state for the gateway.
 ///
@@ -53,10 +47,8 @@ pub struct PairingGuard {
     pairing_code: Arc<Mutex<Option<String>>>,
     /// Set of SHA-256 hashed bearer tokens (persisted across restarts).
     paired_tokens: Arc<Mutex<HashSet<String>>>,
-    /// Brute-force protection: per-client failed attempt counter + lockout time.
-    failed_attempts: Arc<Mutex<FailedAttempts>>,
-    /// Last time we swept stale failed-attempt entries.
-    last_failed_attempts_prune: Arc<Mutex<Instant>>,
+    /// Brute-force protection: per-client failed attempt state + last sweep timestamp.
+    failed_attempts: Arc<Mutex<(HashMap<String, FailedAttemptState>, Instant)>>,
 }
 
 impl PairingGuard {
@@ -69,7 +61,6 @@ impl PairingGuard {
     /// - Plaintext (`zc_...`): hashed on load for backward compatibility
     /// - Already hashed (64-char hex): stored as-is
     pub fn new(require_pairing: bool, existing_tokens: &[String]) -> Self {
-        let now = Instant::now();
         let tokens: HashSet<String> = existing_tokens
             .iter()
             .map(|t| {
@@ -89,8 +80,7 @@ impl PairingGuard {
             require_pairing,
             pairing_code: Arc::new(Mutex::new(code)),
             paired_tokens: Arc::new(Mutex::new(tokens)),
-            failed_attempts: Arc::new(Mutex::new(HashMap::new())),
-            last_failed_attempts_prune: Arc::new(Mutex::new(now)),
+            failed_attempts: Arc::new(Mutex::new((HashMap::new(), Instant::now()))),
         }
     }
 
@@ -104,34 +94,30 @@ impl PairingGuard {
         self.require_pairing
     }
 
-    fn maybe_prune_failed_attempts(&self, attempts: &mut FailedAttempts, now: Instant) {
-        let mut last_prune = self.last_failed_attempts_prune.lock();
-        if now.duration_since(*last_prune).as_secs() < FAILED_ATTEMPT_SWEEP_INTERVAL_SECS {
-            return;
-        }
-        prune_failed_attempts(attempts, now);
-        *last_prune = now;
-    }
-
     fn try_pair_blocking(&self, code: &str, client_id: &str) -> Result<Option<String>, u64> {
+        let client_id = normalize_client_key(client_id);
         let now = Instant::now();
-        let client_key = normalize_client_key(client_id);
 
-        // Check brute force lockout for this specific client
+        // Periodic sweep + lockout check
         {
-            let mut attempts = self.failed_attempts.lock();
-            self.maybe_prune_failed_attempts(&mut attempts, now);
+            let mut guard = self.failed_attempts.lock();
+            let (ref mut map, ref mut last_sweep) = *guard;
 
-            if let Some(state) = attempts.get_mut(&client_key) {
-                state.last_attempt = now;
-                if let Some(lockout_until) = state.lockout_until {
-                    if now < lockout_until {
-                        let remaining = lockout_until.saturating_duration_since(now).as_secs();
+            // Sweep stale entries on interval
+            if now.duration_since(*last_sweep).as_secs() >= FAILED_ATTEMPT_SWEEP_INTERVAL_SECS {
+                prune_failed_attempts(map, now);
+                *last_sweep = now;
+            }
+
+            // Check brute force lockout for this specific client
+            if let Some(state) = map.get(&client_id) {
+                if let Some(until) = state.lockout_until {
+                    if now < until {
+                        let remaining = (until - now).as_secs();
                         return Err(remaining.max(1));
                     }
-                    // Lockout has elapsed; reset this client and continue.
-                    state.count = 0;
-                    state.lockout_until = None;
+                    // Lockout expired — reset inline
+                    map.remove(&client_id);
                 }
             }
         }
@@ -142,8 +128,8 @@ impl PairingGuard {
                 if constant_time_eq(code.trim(), expected.trim()) {
                     // Reset failed attempts for this client on success
                     {
-                        let mut attempts = self.failed_attempts.lock();
-                        attempts.remove(&client_key);
+                        let mut guard = self.failed_attempts.lock();
+                        guard.0.remove(&client_id);
                     }
                     let token = generate_token();
                     let mut tokens = self.paired_tokens.lock();
@@ -159,32 +145,35 @@ impl PairingGuard {
 
         // Increment failed attempts for this client
         {
-            let mut attempts = self.failed_attempts.lock();
-            self.maybe_prune_failed_attempts(&mut attempts, now);
+            let mut guard = self.failed_attempts.lock();
+            let (ref mut map, _) = *guard;
 
-            // Bound memory usage: prune first (above), then LRU-evict if still full.
-            if attempts.len() >= MAX_TRACKED_CLIENTS && !attempts.contains_key(&client_key) {
-                evict_least_recently_active(&mut attempts);
+            // Enforce capacity bound: prune stale first, then LRU-evict if still full
+            if map.len() >= MAX_TRACKED_CLIENTS {
+                prune_failed_attempts(map, now);
+            }
+            if map.len() >= MAX_TRACKED_CLIENTS {
+                // Evict the least-recently-active entry
+                if let Some(lru_key) = map
+                    .iter()
+                    .min_by_key(|(_, s)| s.last_attempt)
+                    .map(|(k, _)| k.clone())
+                {
+                    map.remove(&lru_key);
+                }
             }
 
-            let entry = attempts.entry(client_key).or_insert(FailedAttemptState {
+            let entry = map.entry(client_id).or_insert(FailedAttemptState {
                 count: 0,
                 lockout_until: None,
                 last_attempt: now,
             });
 
-            // Reset if previous lockout has expired.
-            if let Some(lockout_until) = entry.lockout_until {
-                if now >= lockout_until {
-                    entry.count = 0;
-                    entry.lockout_until = None;
-                }
-            }
-
-            entry.count = entry.count.saturating_add(1);
             entry.last_attempt = now;
+            entry.count += 1;
+
             if entry.count >= MAX_PAIR_ATTEMPTS {
-                entry.lockout_until = Some(now + Duration::from_secs(PAIR_LOCKOUT_SECS));
+                entry.lockout_until = Some(now + std::time::Duration::from_secs(PAIR_LOCKOUT_SECS));
             }
         }
 
@@ -229,29 +218,21 @@ impl PairingGuard {
     }
 }
 
-fn prune_failed_attempts(attempts: &mut FailedAttempts, now: Instant) {
-    attempts.retain(|_, state| {
-        now.duration_since(state.last_attempt).as_secs() <= FAILED_ATTEMPT_RETENTION_SECS
-    });
-}
-
-fn evict_least_recently_active(attempts: &mut FailedAttempts) {
-    let lru_key = attempts
-        .iter()
-        .min_by_key(|(_, state)| state.last_attempt)
-        .map(|(client, _)| client.clone());
-    if let Some(client) = lru_key {
-        attempts.remove(&client);
-    }
-}
-
-fn normalize_client_key(client_id: &str) -> String {
-    let trimmed = client_id.trim();
+/// Normalize a client identifier: trim whitespace, map empty to `"unknown"`.
+fn normalize_client_key(key: &str) -> String {
+    let trimmed = key.trim();
     if trimmed.is_empty() {
         "unknown".to_string()
     } else {
         trimmed.to_string()
     }
+}
+
+/// Remove failed-attempt entries whose `last_attempt` is older than the retention window.
+fn prune_failed_attempts(map: &mut HashMap<String, FailedAttemptState>, now: Instant) {
+    map.retain(|_, state| {
+        now.duration_since(state.last_attempt).as_secs() < FAILED_ATTEMPT_RETENTION_SECS
+    });
 }
 
 /// Generate a 6-digit numeric pairing code using cryptographically secure randomness.
@@ -722,92 +703,6 @@ mod tests {
         assert!(
             result.is_ok(),
             "Legitimate client should not be locked out by attacker"
-        );
-    }
-
-    #[test]
-    async fn successful_pair_resets_only_the_requesting_client_attempts() {
-        let guard = PairingGuard::new(true, &[]);
-        let code = guard.pairing_code().unwrap();
-        let client_a = "client_a";
-        let client_b = "client_b";
-
-        for _ in 0..(MAX_PAIR_ATTEMPTS - 1) {
-            let _ = guard.try_pair("invalid-code", client_a).await;
-            let _ = guard.try_pair("invalid-code", client_b).await;
-        }
-
-        let paired = guard.try_pair(&code, client_a).await.unwrap();
-        assert!(paired.is_some(), "client_a should pair successfully");
-
-        let attempts = guard.failed_attempts.lock();
-        assert!(
-            !attempts.contains_key(client_a),
-            "successful client should be removed from failed-attempt tracking"
-        );
-        let client_b_state = attempts
-            .get(client_b)
-            .expect("other clients should keep their attempt state");
-        assert_eq!(client_b_state.count, MAX_PAIR_ATTEMPTS - 1);
-    }
-
-    #[test]
-    async fn failed_attempt_tracking_stays_bounded_at_capacity() {
-        let guard = PairingGuard::new(true, &[]);
-
-        for i in 0..(MAX_TRACKED_CLIENTS + 128) {
-            let client = format!("client_{i}");
-            let _ = guard.try_pair("invalid-code", &client).await;
-        }
-
-        // Key normalization: blank/whitespace clients collapse to "unknown".
-        let _ = guard.try_pair("invalid-code", "").await;
-        let _ = guard.try_pair("invalid-code", "   ").await;
-
-        let attempts = guard.failed_attempts.lock();
-        assert!(
-            attempts.len() <= MAX_TRACKED_CLIENTS,
-            "tracked clients must remain bounded"
-        );
-        let unknown = attempts
-            .get("unknown")
-            .expect("blank client identifiers should normalize to 'unknown'");
-        assert_eq!(unknown.count, 2);
-    }
-
-    #[test]
-    async fn stale_failed_attempts_are_pruned_on_sweep() {
-        let guard = PairingGuard::new(true, &[]);
-        let stale_client = "stale_client";
-        let fresh_client = "fresh_client";
-
-        let _ = guard.try_pair("invalid-code", stale_client).await;
-        let _ = guard.try_pair("invalid-code", fresh_client).await;
-
-        {
-            let mut attempts = guard.failed_attempts.lock();
-            let stale_state = attempts
-                .get_mut(stale_client)
-                .expect("stale client should exist before sweep");
-            stale_state.last_attempt =
-                Instant::now() - Duration::from_secs(FAILED_ATTEMPT_RETENTION_SECS + 1);
-        }
-        {
-            let mut last_prune = guard.last_failed_attempts_prune.lock();
-            *last_prune =
-                Instant::now() - Duration::from_secs(FAILED_ATTEMPT_SWEEP_INTERVAL_SECS + 1);
-        }
-
-        let _ = guard.try_pair("invalid-code", "trigger_client").await;
-
-        let attempts = guard.failed_attempts.lock();
-        assert!(
-            !attempts.contains_key(stale_client),
-            "stale client should be pruned"
-        );
-        assert!(
-            attempts.contains_key(fresh_client),
-            "recent client should remain tracked"
         );
     }
 }

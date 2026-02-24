@@ -29,7 +29,7 @@ Modes:
 Options:
   --guided                   Run interactive guided installer
   --no-guided                Disable guided installer
-  --docker                   Run bootstrap in Docker-compatible mode (one-shot container) and launch onboarding inside it
+  --docker                   Run bootstrap in Docker-compatible mode and launch onboarding inside the container
   --install-system-deps      Install build dependencies (Linux/macOS)
   --install-rust             Install Rust via rustup if missing
   --prefer-prebuilt          Try latest release binary first; fallback to source build on miss
@@ -626,7 +626,7 @@ ensure_docker_ready() {
 
 run_docker_bootstrap() {
   local docker_image docker_data_dir default_data_dir fallback_image
-  local config_mount workspace_mount docker_run_hint
+  local config_mount workspace_mount
   local -a container_run_user_args container_run_namespace_args
   docker_image="${ZEROCLAW_DOCKER_IMAGE:-zeroclaw-bootstrap:local}"
   fallback_image="ghcr.io/zeroclaw-labs/zeroclaw:latest"
@@ -679,20 +679,6 @@ run_docker_bootstrap() {
   info "Docker data directory: $docker_data_dir"
   info "Container CLI: $CONTAINER_CLI"
 
-  docker_run_hint="$CONTAINER_CLI run --rm -it"
-  if [[ "${#container_run_namespace_args[@]}" -gt 0 ]]; then
-    docker_run_hint+=" ${container_run_namespace_args[*]}"
-  fi
-  if [[ "${#container_run_user_args[@]}" -gt 0 ]]; then
-    docker_run_hint+=" ${container_run_user_args[*]}"
-  fi
-  docker_run_hint+=" -e HOME=/zeroclaw-data"
-  docker_run_hint+=" -e ZEROCLAW_WORKSPACE=/zeroclaw-data/workspace"
-  docker_run_hint+=" -v \"$config_mount\""
-  docker_run_hint+=" -v \"$workspace_mount\""
-  docker_run_hint+=" \"$docker_image\""
-  DOCKER_RUN_HINT="$docker_run_hint"
-
   local onboard_cmd=()
   if [[ "$INTERACTIVE_ONBOARD" == true ]]; then
     info "Launching interactive onboarding in container"
@@ -726,8 +712,6 @@ MSG
     "${container_run_user_args[@]}" \
     -e HOME=/zeroclaw-data \
     -e ZEROCLAW_WORKSPACE=/zeroclaw-data/workspace \
-    -e ZEROCLAW_DOCKER_BOOTSTRAP=1 \
-    -e ZEROCLAW_HOST_DOCKER_RUN_HINT="$docker_run_hint" \
     -v "$config_mount" \
     -v "$workspace_mount" \
     "$docker_image" \
@@ -752,7 +736,6 @@ INTERACTIVE_ONBOARD=false
 SKIP_BUILD=false
 SKIP_INSTALL=false
 PREBUILT_INSTALLED=false
-DOCKER_RUN_HINT=""
 CONTAINER_CLI="${ZEROCLAW_CONTAINER_CLI:-docker}"
 API_KEY="${ZEROCLAW_API_KEY:-}"
 PROVIDER="${ZEROCLAW_PROVIDER:-openrouter}"
@@ -959,17 +942,9 @@ if [[ "$DOCKER_MODE" == true ]]; then
 Your containerized ZeroClaw data is persisted under:
 DONE
   echo "  $DOCKER_DATA_DIR"
-  cat <<DONE
+  cat <<'DONE'
 
 Next steps:
-  # Docker mode uses one-shot containers via "$CONTAINER_CLI run --rm ...",
-  # so docker ps/podman ps will usually show no running ZeroClaw container.
-  # Run regular ZeroClaw commands from your host shell with:
-  $DOCKER_RUN_HINT status
-  $DOCKER_RUN_HINT agent -m "Hello, ZeroClaw!"
-  $DOCKER_RUN_HINT auth login --provider openai-codex --device-code
-
-  # Re-run onboarding helpers:
   ./zeroclaw_install.sh --docker --interactive-onboard
   ./zeroclaw_install.sh --docker --api-key "sk-..." --provider openrouter
 DONE

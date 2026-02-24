@@ -283,12 +283,6 @@ impl Agent {
             &config.agents,
             config.api_key.as_deref(),
             config,
-            None, // agent struct — SOP engine created internally if needed
-            None, // agent struct — no SOP metrics collector
-            #[cfg(feature = "ampersona-gates")]
-            None, // agent struct — no gate evaluation state wiring
-            #[cfg(not(feature = "ampersona-gates"))]
-            None,
         );
 
         let provider_name = config.default_provider.as_deref().unwrap_or("openrouter");
@@ -299,22 +293,13 @@ impl Agent {
             .unwrap_or("anthropic/claude-sonnet-4-20250514")
             .to_string();
 
-        let provider_runtime_options = providers::ProviderRuntimeOptions {
-            auth_profile_override: None,
-            zeroclaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
-            secrets_encrypt: config.secrets.encrypt,
-            reasoning_enabled: config.runtime.reasoning_enabled,
-            reasoning_level: config.provider.reasoning_level.clone(),
-        };
-
-        let provider: Box<dyn Provider> = providers::create_routed_provider_with_options(
+        let provider: Box<dyn Provider> = providers::create_routed_provider(
             provider_name,
             config.api_key.as_deref(),
             config.api_url.as_deref(),
             &config.reliability,
             &config.model_routes,
             &model_name,
-            &provider_runtime_options,
         )?;
 
         let dispatcher_choice = config.agent.tool_dispatcher.as_str();

@@ -35,7 +35,7 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
             move || {
                 let cfg = gateway_cfg.clone();
                 let host = gateway_host.clone();
-                async move { crate::gateway::run_gateway(&host, port, cfg, None, None, None).await }
+                async move { crate::gateway::run_gateway(&host, port, cfg).await }
             },
         ));
     }
@@ -399,7 +399,6 @@ mod tests {
         let mut config = Config::default();
         config.channels_config.telegram = Some(crate::config::TelegramConfig {
             bot_token: "token".into(),
-            base_url: None,
             allowed_users: vec![],
             stream_mode: crate::config::StreamMode::default(),
             draft_update_interval_ms: 1000,
@@ -532,7 +531,6 @@ mod tests {
         config.heartbeat.to = Some("123456".into());
         config.channels_config.telegram = Some(crate::config::TelegramConfig {
             bot_token: "bot-token".into(),
-            base_url: None,
             allowed_users: vec![],
             stream_mode: crate::config::StreamMode::default(),
             draft_update_interval_ms: 1000,

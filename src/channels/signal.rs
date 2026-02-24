@@ -1,6 +1,3 @@
-use crate::channels::signal_pin::{
-    SignalPinGateStatus, SignalPinLockReason, SignalPinManager, SignalPinVerifyResult,
-};
 use crate::channels::traits::{Channel, ChannelMessage, SendMessage};
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -11,8 +8,6 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 const GROUP_TARGET_PREFIX: &str = "group:";
-const PIN_LOCKED_PROMPT: &str =
-    "🔒 PIN verification required. Your Signal access has expired. Please reply with your PIN to re-verify.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RecipientTarget {
@@ -33,7 +28,6 @@ pub struct SignalChannel {
     allowed_from: Vec<String>,
     ignore_attachments: bool,
     ignore_stories: bool,
-    pin_manager: Option<SignalPinManager>,
 }
 
 // ── signal-cli SSE event JSON shapes ────────────────────────────
@@ -93,13 +87,7 @@ impl SignalChannel {
             allowed_from,
             ignore_attachments,
             ignore_stories,
-            pin_manager: None,
         }
-    }
-
-    pub fn with_pin_manager(mut self, pin_manager: SignalPinManager) -> Self {
-        self.pin_manager = Some(pin_manager);
-        self
     }
 
     fn http_client(&self) -> Client {
@@ -280,91 +268,6 @@ impl SignalChannel {
             thread_ts: None,
         })
     }
-
-    fn looks_like_pin_candidate(content: &str) -> bool {
-        let trimmed = content.trim();
-        !trimmed.is_empty() && trimmed.len() <= 64 && !trimmed.chars().any(|ch| ch.is_whitespace())
-    }
-
-    async fn send_pin_gate_notice(&self, recipient: &str, content: String) -> anyhow::Result<()> {
-        self.send(&SendMessage::new(content, recipient.to_string()))
-            .await
-    }
-
-    async fn apply_pin_gate(
-        &self,
-        message: ChannelMessage,
-    ) -> anyhow::Result<Option<ChannelMessage>> {
-        let Some(pin_manager) = &self.pin_manager else {
-            return Ok(Some(message));
-        };
-
-        let gate_status = pin_manager.gate_status()?;
-        match gate_status {
-            SignalPinGateStatus::Open { reminder } => {
-                if let Some(reminder) = reminder {
-                    let reminder_msg = format!(
-                        "🔔 PIN reminder. Your Signal access will expire in {} hours. Reply with your PIN to re-verify, or you'll be prompted on your next message.",
-                        reminder.hours_remaining
-                    );
-                    if self
-                        .send_pin_gate_notice(&message.reply_target, reminder_msg)
-                        .await
-                        .is_ok()
-                    {
-                        let _ = pin_manager.mark_reminder_sent();
-                    }
-                }
-                Ok(Some(message))
-            }
-            SignalPinGateStatus::Locked { reason } => {
-                if reason == SignalPinLockReason::LockedOut {
-                    let lockout_msg = match pin_manager.verify_pin_attempt("")? {
-                        SignalPinVerifyResult::LockedOut { remaining_minutes } => format!(
-                            "⏳ Signal PIN verification is temporarily suspended for {remaining_minutes} more minutes after repeated failed attempts."
-                        ),
-                        _ => "⏳ Signal PIN verification is temporarily suspended after repeated failed attempts."
-                            .to_string(),
-                    };
-                    self.send_pin_gate_notice(&message.reply_target, lockout_msg)
-                        .await?;
-                    return Ok(None);
-                }
-
-                if !Self::looks_like_pin_candidate(&message.content)
-                    || reason == SignalPinLockReason::NotConfigured
-                    || reason == SignalPinLockReason::CorruptState
-                {
-                    self.send_pin_gate_notice(&message.reply_target, PIN_LOCKED_PROMPT.to_string())
-                        .await?;
-                    return Ok(None);
-                }
-
-                let verification = pin_manager.verify_pin_attempt(message.content.trim())?;
-                let response = match verification {
-                    SignalPinVerifyResult::Verified { .. } => {
-                        "✅ PIN verified. Signal access restored.".to_string()
-                    }
-                    SignalPinVerifyResult::Incorrect {
-                        remaining_attempts,
-                        lockout_minutes,
-                    } => format!(
-                        "❌ Incorrect PIN. Please try again. After {remaining_attempts} failed attempts, Signal access will be suspended for {lockout_minutes} minutes."
-                    ),
-                    SignalPinVerifyResult::LockedOut { remaining_minutes } => format!(
-                        "⏳ Signal PIN verification is temporarily suspended for {remaining_minutes} more minutes after repeated failed attempts."
-                    ),
-                    SignalPinVerifyResult::NotConfigured | SignalPinVerifyResult::CorruptState => {
-                        PIN_LOCKED_PROMPT.to_string()
-                    }
-                };
-
-                self.send_pin_gate_notice(&message.reply_target, response)
-                    .await?;
-                Ok(None)
-            }
-        }
-    }
 }
 
 #[async_trait]
@@ -467,18 +370,8 @@ impl Channel for SignalChannel {
                                 Ok(sse) => {
                                     if let Some(ref envelope) = sse.envelope {
                                         if let Some(msg) = self.process_envelope(envelope) {
-                                            match self.apply_pin_gate(msg).await {
-                                                Ok(Some(forward_msg)) => {
-                                                    if tx.send(forward_msg).await.is_err() {
-                                                        return Ok(());
-                                                    }
-                                                }
-                                                Ok(None) => {}
-                                                Err(error) => {
-                                                    tracing::warn!(
-                                                        "Signal PIN gate failed while handling inbound message: {error}"
-                                                    );
-                                                }
+                                            if tx.send(msg).await.is_err() {
+                                                return Ok(());
                                             }
                                         }
                                     }
@@ -504,17 +397,7 @@ impl Channel for SignalChannel {
                     Ok(sse) => {
                         if let Some(ref envelope) = sse.envelope {
                             if let Some(msg) = self.process_envelope(envelope) {
-                                match self.apply_pin_gate(msg).await {
-                                    Ok(Some(forward_msg)) => {
-                                        let _ = tx.send(forward_msg).await;
-                                    }
-                                    Ok(None) => {}
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            "Signal PIN gate failed while handling trailing inbound message: {error}"
-                                        );
-                                    }
-                                }
+                                let _ = tx.send(msg).await;
                             }
                         }
                     }

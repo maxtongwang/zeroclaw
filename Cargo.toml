@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "zeroclaw"
-version = "0.1.7"
+version = "0.1.6"
 edition = "2021"
 authors = ["theonlyhennygod"]
 license = "MIT OR Apache-2.0"
@@ -45,7 +45,7 @@ shellexpand = "3.1"
 schemars = "1.2"
 
 # Logging - minimal
-tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
+tracing = { version = "0.1", default-features = false }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "env-filter"] }
 
 # Observability - Prometheus metrics
@@ -78,7 +78,6 @@ chacha20poly1305 = "0.10"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
-argon2 = "0.5"
 
 # CSPRNG for secure token generation
 rand = "0.10"
@@ -111,9 +110,6 @@ console = "0.16"
 
 # Hardware discovery (device path globbing)
 glob = "0.3"
-
-# MQTT event bus
-rumqttc = "0.24"
 
 # Binary discovery (init system detection)
 which = "8.0"
@@ -210,9 +206,6 @@ probe = ["dep:probe-rs"]
 rag-pdf = ["dep:pdf-extract"]
 # whatsapp-web = Native WhatsApp Web client with custom rusqlite storage backend
 whatsapp-web = ["dep:wa-rs", "dep:wa-rs-core", "dep:wa-rs-binary", "dep:wa-rs-proto", "dep:wa-rs-ureq-http", "dep:wa-rs-tokio-transport", "dep:serde-big-array", "dep:prost", "dep:qrcode"]
-
-# Optional SOP gate integration extension (reserved; no default deps in this branch)
-ampersona-gates = []
 
 [profile.release]
 opt-level = "z"      # Optimize for size

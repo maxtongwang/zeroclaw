@@ -145,7 +145,6 @@ Delegate sub-agent configurations. Each key under `[agents]` defines a named sub
 | `model` | _required_ | Model name for the sub-agent |
 | `system_prompt` | unset | Optional system prompt override for the sub-agent |
 | `api_key` | unset | Optional API key override (stored encrypted when `secrets.encrypt = true`) |
-| `api_url` | unset | Optional API base URL override for this sub-agent (for example remote Ollama host) |
 | `temperature` | unset | Temperature override for the sub-agent |
 | `max_depth` | `3` | Max recursion depth for nested delegation |
 | `agentic` | `false` | Enable multi-turn tool-call loop mode for the sub-agent |
@@ -170,7 +169,6 @@ max_iterations = 8
 
 [agents.coder]
 provider = "ollama"
-api_url = "http://192.168.1.15:11434"
 model = "qwen2.5-coder:32b"
 temperature = 0.2
 ```
@@ -186,26 +184,6 @@ Notes:
 - `reasoning_enabled = false` explicitly disables provider-side reasoning for supported providers (currently `ollama`, via request field `think: false`).
 - `reasoning_enabled = true` explicitly requests reasoning for supported providers (`think: true` on `ollama`).
 - Unset keeps provider defaults.
-
-## `[provider.reasoning_level]`
-
-Per-model reasoning effort overrides for providers that support explicit effort levels
-(currently `openai-codex`).
-
-```toml
-[provider.reasoning_level]
-default = "xhigh"
-"gpt-5-codex" = "high"
-"openai-codex/gpt-5.3-codex" = "xhigh"
-"gpt-5.2-codex" = "medium"
-```
-
-Rules:
-
-- `default` is used when no model-specific key matches.
-- Model keys can be either bare model IDs (`gpt-5-codex`) or provider-qualified (`openai-codex/gpt-5-codex`).
-- Supported values: `minimal`, `low`, `medium`, `high`, `xhigh`.
-- If unset, provider defaults are used (for Codex this remains the existing default behavior).
 
 ## `[skills]`
 
@@ -241,58 +219,6 @@ Notes:
 - ZeroClaw requests Composio v3 tools with `toolkit_versions=latest` and executes tools with `version="latest"` to avoid stale default tool revisions.
 - Typical flow: call `connect`, complete browser OAuth, then run `execute` for the desired tool action.
 - If Composio returns a missing connected-account reference error, call `list_accounts` (optionally with `app`) and pass the returned `connected_account_id` to `execute`.
-
-## `[mcp]`
-
-| Key | Default | Purpose |
-|---|---|---|
-| `enabled` | `false` | Enable external MCP server handling |
-| `servers` | `{}` | Named MCP server definitions |
-
-Server keys under `mcp.servers.<name>`:
-
-| Key | Default | Purpose |
-|---|---|---|
-| `enabled` | `true` | Enable/disable this specific server entry |
-| `command` | unset | Stdio transport command (for example `npx`) |
-| `args` | `[]` | Stdio transport arguments |
-| `url` | unset | Remote MCP endpoint (`http://` or `https://`) |
-| `headers` | `{}` | Optional static headers for remote transport |
-| `timeout_secs` | `30` | Request/session timeout budget |
-
-Notes:
-
-- Exactly one transport is required per server: `command` (stdio) or `url` (remote).
-- `mcp.enabled = true` requires at least one entry in `mcp.servers`.
-- Server names must use only letters, digits, `_`, or `-`.
-- For compatibility with JSON-style configs, `mcp.mcpServers` is accepted as an alias for `mcp.servers`.
-
-## `[plugins]`
-
-| Key | Default | Purpose |
-|---|---|---|
-| `enabled` | `false` | Enable runtime plugin loading |
-| `directory` | unset | Optional plugin manifest directory (`*.toml` / `*.json`) |
-| `registry` | `{}` | Named plugin definitions declared directly in config |
-
-Plugin keys under `plugins.registry.<id>`:
-
-| Key | Default | Purpose |
-|---|---|---|
-| `enabled` | `true` | Enable/disable this plugin definition |
-| `kind` | required | Extension kind: `memory`, `channel`, or `security` |
-| `command` | required | Executable used to run plugin operations |
-| `args` | `[]` | Extra command arguments |
-| `env` | `{}` | Additional environment variables for plugin process |
-| `timeout_secs` | `30` | Timeout per plugin operation |
-
-Notes:
-
-- Plugin IDs must use only letters, digits, `_`, or `-`.
-- `plugins.enabled = true` requires either a non-empty `plugins.registry` or a `plugins.directory`.
-- `memory.backend = "plugin:<id>"` activates a memory plugin at runtime.
-- Built-in implementations remain fallback defaults when plugins are disabled or unavailable.
-- If both manifest and config define the same plugin ID, `plugins.registry.<id>` overrides manifest values.
 
 ## `[cost]`
 
@@ -403,7 +329,7 @@ Notes:
 | `workspace_only` | `true` | reject absolute path inputs unless explicitly disabled |
 | `allowed_commands` | _required for shell execution_ | allowlist of executable names, explicit executable paths, or `"*"` |
 | `forbidden_paths` | built-in protected list | explicit path denylist (system paths + sensitive dotdirs by default) |
-| `allowed_roots` | `[]` | additional roots allowed outside workspace after canonicalization; when non-empty, they scope outside access |
+| `allowed_roots` | `[]` | additional roots allowed outside workspace after canonicalization |
 | `max_actions_per_hour` | `20` | per-policy action budget |
 | `max_cost_per_day_cents` | `500` | per-policy spend guardrail |
 | `require_approval_for_medium_risk` | `true` | approval gate for medium-risk commands |
@@ -414,8 +340,7 @@ Notes:
 Notes:
 
 - `level = "full"` skips medium-risk approval gating for shell execution, while still enforcing configured guardrails.
-- With `workspace_only = false` and `allowed_roots = []`, outside-workspace access is allowed after canonicalization (except paths denied by `forbidden_paths`).
-- When `allowed_roots` is non-empty, outside-workspace access is constrained to those roots.
+- Access outside the workspace requires `allowed_roots`, even when `workspace_only = false`.
 - `allowed_roots` supports absolute paths, `~/...`, and workspace-relative paths.
 - `allowed_commands` entries can be command names (for example, `"git"`), explicit executable paths (for example, `"/usr/bin/antigravity"`), or `"*"` to allow any command name/path (risk gates still apply).
 - Shell separator/operator parsing is quote-aware. Characters like `;` inside quoted arguments are treated as literals, not command separators.
@@ -565,7 +490,6 @@ Notes:
 - When a timeout occurs, users receive: `⚠️ Request timed out while waiting for the model. Please try again.`
 - Telegram-only interruption behavior is controlled with `channels_config.telegram.interrupt_on_new_message` (default `false`).
   When enabled, a newer message from the same sender in the same chat cancels the in-flight request and preserves interrupted user context.
-- `channels_config.telegram.base_url` is optional and defaults to `https://api.telegram.org`; set `https://tapi.bale.ai` for Bale.
 - While `zeroclaw channel start` is running, updates to `default_provider`, `default_model`, `default_temperature`, `api_key`, `api_url`, and `reliability.*` are hot-applied from `config.toml` on the next inbound message.
 
 ### `[channels_config.nostr]`

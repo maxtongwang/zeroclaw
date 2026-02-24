@@ -4,19 +4,17 @@ pub mod traits;
 #[allow(unused_imports)]
 pub use schema::{
     apply_runtime_proxy_to_builder, build_runtime_proxy_client,
-    build_runtime_proxy_client_with_timeouts, runtime_plugins_config, runtime_proxy_config,
-    set_runtime_plugins_config, set_runtime_proxy_config, AgentConfig, AuditConfig, AutonomyConfig,
-    BrowserComputerUseConfig, BrowserConfig, BuiltinHooksConfig, ChannelsConfig,
-    ClassificationRule, ComposioConfig, Config, CostConfig, CronConfig, DelegateAgentConfig,
-    DiscordConfig, DockerRuntimeConfig, EmbeddingRouteConfig, EstopConfig, FeishuConfig,
-    GatewayConfig, HardwareConfig, HardwareTransport, HeartbeatConfig, HooksConfig,
-    HttpRequestConfig, IMessageConfig, IdentityConfig, LarkConfig, MatrixConfig, McpConfig,
-    McpServerConfig, MemoryConfig, ModelRouteConfig, MqttConfig, MultimodalConfig,
-    NextcloudTalkConfig, ObservabilityConfig, OtpConfig, OtpMethod, PeripheralBoardConfig,
-    PeripheralsConfig, PluginDefinition, PluginKind, PluginsConfig, ProviderConfig, ProxyConfig,
-    ProxyScope, QueryClassificationConfig, ReliabilityConfig, ResourceLimitsConfig, RuntimeConfig,
+    build_runtime_proxy_client_with_timeouts, runtime_proxy_config, set_runtime_proxy_config,
+    AgentConfig, AuditConfig, AutonomyConfig, BrowserComputerUseConfig, BrowserConfig,
+    BuiltinHooksConfig, ChannelsConfig, ClassificationRule, ComposioConfig, Config, CostConfig,
+    CronConfig, DelegateAgentConfig, DiscordConfig, DockerRuntimeConfig, EmbeddingRouteConfig,
+    EstopConfig, FeishuConfig, GatewayConfig, HardwareConfig, HardwareTransport, HeartbeatConfig,
+    HooksConfig, HttpRequestConfig, IMessageConfig, IdentityConfig, LarkConfig, MatrixConfig,
+    MemoryConfig, ModelRouteConfig, MultimodalConfig, NextcloudTalkConfig, ObservabilityConfig,
+    OtpConfig, PeripheralBoardConfig, PeripheralsConfig, ProxyConfig, ProxyScope,
+    QueryClassificationConfig, ReliabilityConfig, ResourceLimitsConfig, RuntimeConfig,
     SandboxBackend, SandboxConfig, SchedulerConfig, SecretsConfig, SecurityConfig, SkillsConfig,
-    SkillsPromptInjectionMode, SlackConfig, SopConfig, StorageConfig, StorageProviderConfig,
+    SkillsPromptInjectionMode, SlackConfig, StorageConfig, StorageProviderConfig,
     StorageProviderSection, StreamMode, TelegramConfig, TranscriptionConfig, TunnelConfig,
     WebFetchConfig, WebSearchConfig, WebhookConfig,
 };
@@ -42,7 +40,6 @@ mod tests {
     fn reexported_channel_configs_are_constructible() {
         let telegram = TelegramConfig {
             bot_token: "token".into(),
-            base_url: None,
             allowed_users: vec!["alice".into()],
             stream_mode: StreamMode::default(),
             draft_update_interval_ms: 1000,
@@ -69,6 +66,15 @@ mod tests {
             receive_mode: crate::config::schema::LarkReceiveMode::Websocket,
             port: None,
         };
+        let feishu = FeishuConfig {
+            app_id: "app-id".into(),
+            app_secret: "app-secret".into(),
+            encrypt_key: None,
+            verification_token: None,
+            allowed_users: vec![],
+            receive_mode: crate::config::schema::LarkReceiveMode::Websocket,
+            port: None,
+        };
 
         let nextcloud_talk = NextcloudTalkConfig {
             base_url: "https://cloud.example.com".into(),
@@ -80,6 +86,7 @@ mod tests {
         assert_eq!(telegram.allowed_users.len(), 1);
         assert_eq!(discord.guild_id.as_deref(), Some("123"));
         assert_eq!(lark.app_id, "app-id");
+        assert_eq!(feishu.app_id, "app-id");
         assert_eq!(nextcloud_talk.base_url, "https://cloud.example.com");
     }
 }

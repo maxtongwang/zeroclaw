@@ -4,8 +4,9 @@ use crate::config::schema::{
 };
 use crate::config::{
     AutonomyConfig, BrowserConfig, ChannelsConfig, ComposioConfig, Config, DiscordConfig,
-    HeartbeatConfig, IMessageConfig, LarkConfig, MatrixConfig, MemoryConfig, ObservabilityConfig,
-    RuntimeConfig, SecretsConfig, SlackConfig, StorageConfig, TelegramConfig, WebhookConfig,
+    FeishuConfig, HeartbeatConfig, IMessageConfig, LarkConfig, MatrixConfig, MemoryConfig,
+    ObservabilityConfig, RuntimeConfig, SecretsConfig, SlackConfig, StorageConfig, TelegramConfig,
+    WebhookConfig,
 };
 use crate::hardware::{self, HardwareConfig};
 use crate::memory::{
@@ -63,21 +64,6 @@ const CUSTOM_MODEL_SENTINEL: &str = "__custom_model__";
 
 fn has_launchable_channels(channels: &ChannelsConfig) -> bool {
     channels.channels_except_webhook().iter().any(|(_, ok)| *ok)
-}
-
-fn docker_host_run_hint() -> Option<String> {
-    std::env::var("ZEROCLAW_HOST_DOCKER_RUN_HINT")
-        .ok()
-        .map(|hint| hint.trim().to_string())
-        .filter(|hint| !hint.is_empty())
-}
-
-fn format_zeroclaw_command(subcommand: &str, docker_hint: Option<&str>) -> String {
-    if let Some(prefix) = docker_hint {
-        format!("{prefix} {subcommand}")
-    } else {
-        format!("zeroclaw {subcommand}")
-    }
 }
 
 // ── Main wizard entry point ──────────────────────────────────────
@@ -150,7 +136,6 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         default_provider: Some(provider),
         default_model: Some(model),
         default_temperature: 0.7,
-        provider: crate::config::ProviderConfig::default(),
         observability: ObservabilityConfig::default(),
         autonomy: AutonomyConfig::default(),
         security: crate::config::SecurityConfig::default(),
@@ -169,9 +154,6 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         tunnel: tunnel_config,
         gateway: crate::config::GatewayConfig::default(),
         composio: composio_config,
-        mcp: crate::config::McpConfig::default(),
-        sop: crate::config::SopConfig::default(),
-        plugins: crate::config::PluginsConfig::default(),
         secrets: secrets_config,
         browser: BrowserConfig::default(),
         http_request: crate::config::HttpRequestConfig::default(),
@@ -503,7 +485,6 @@ async fn run_quick_setup_with_home(
         default_provider: Some(provider_name.clone()),
         default_model: Some(model.clone()),
         default_temperature: 0.7,
-        provider: crate::config::ProviderConfig::default(),
         observability: ObservabilityConfig::default(),
         autonomy: AutonomyConfig::default(),
         security: crate::config::SecurityConfig::default(),
@@ -522,9 +503,6 @@ async fn run_quick_setup_with_home(
         tunnel: crate::config::TunnelConfig::default(),
         gateway: crate::config::GatewayConfig::default(),
         composio: ComposioConfig::default(),
-        mcp: crate::config::McpConfig::default(),
-        sop: crate::config::SopConfig::default(),
-        plugins: crate::config::PluginsConfig::default(),
         secrets: SecretsConfig::default(),
         browser: BrowserConfig::default(),
         http_request: crate::config::HttpRequestConfig::default(),
@@ -622,28 +600,16 @@ async fn run_quick_setup_with_home(
         style(config_path.display()).green()
     );
     println!();
-    let docker_hint = docker_host_run_hint();
-    if docker_hint.is_some() {
-        println!(
-            "  {}",
-            style("Docker bootstrap mode detected: run the commands below from your host shell.")
-                .dim()
-        );
-        println!();
-    }
     println!("  {}", style("Next steps:").white().bold());
-    let chat_cmd = format_zeroclaw_command("agent -m \"Hello!\"", docker_hint.as_deref());
-    let gateway_cmd = format_zeroclaw_command("gateway", docker_hint.as_deref());
-    let status_cmd = format_zeroclaw_command("status", docker_hint.as_deref());
     if credential_override.is_none() {
         println!("    1. Set your API key:  export OPENROUTER_API_KEY=\"sk-...\"");
         println!("    2. Or edit:           ~/.zeroclaw/config.toml");
-        println!("    3. Chat:              {chat_cmd}");
-        println!("    4. Gateway:           {gateway_cmd}");
+        println!("    3. Chat:              zeroclaw agent -m \"Hello!\"");
+        println!("    4. Gateway:           zeroclaw gateway");
     } else {
-        println!("    1. Chat:     {chat_cmd}");
-        println!("    2. Gateway:  {gateway_cmd}");
-        println!("    3. Status:   {status_cmd}");
+        println!("    1. Chat:     zeroclaw agent -m \"Hello!\"");
+        println!("    2. Gateway:  zeroclaw gateway");
+        println!("    3. Status:   zeroclaw status");
     }
     println!();
 
@@ -1699,7 +1665,11 @@ fn print_model_preview(models: &[String]) {
     }
 }
 
-fn resolve_models_provider(config: &Config, provider_override: Option<&str>) -> Result<String> {
+pub async fn run_models_refresh(
+    config: &Config,
+    provider_override: Option<&str>,
+    force: bool,
+) -> Result<()> {
     let provider_name = provider_override
         .or(config.default_provider.as_deref())
         .unwrap_or("openrouter")
@@ -1707,26 +1677,8 @@ fn resolve_models_provider(config: &Config, provider_override: Option<&str>) -> 
         .to_string();
 
     if provider_name.is_empty() {
-        bail!("Provider name cannot be empty");
+        anyhow::bail!("Provider name cannot be empty");
     }
-
-    Ok(provider_name)
-}
-
-fn resolved_default_model(config: &Config) -> Option<&str> {
-    config
-        .default_model
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
-pub async fn run_models_refresh(
-    config: &Config,
-    provider_override: Option<&str>,
-    force: bool,
-) -> Result<()> {
-    let provider_name = resolve_models_provider(config, provider_override)?;
 
     if !supports_live_model_fetch(&provider_name) {
         anyhow::bail!("Provider '{provider_name}' does not support live model discovery yet");
@@ -1802,122 +1754,89 @@ pub async fn run_models_refresh(
 }
 
 pub async fn run_models_list(config: &Config, provider_override: Option<&str>) -> Result<()> {
-    let provider_name = resolve_models_provider(config, provider_override)?;
-    let current_default_model = resolved_default_model(config);
+    let provider_name = provider_override
+        .or(config.default_provider.as_deref())
+        .unwrap_or("openrouter");
 
-    let Some(cached) =
-        load_any_cached_models_for_provider(&config.workspace_dir, &provider_name).await?
-    else {
-        println!("No cached models found for '{provider_name}'.");
+    let cached = load_any_cached_models_for_provider(&config.workspace_dir, provider_name).await?;
+
+    let Some(cached) = cached else {
+        println!();
         println!(
-            "Tip: run `zeroclaw models refresh --provider {provider_name}` to fetch and cache models."
+            "  No cached models for '{provider_name}'. Run: zeroclaw models refresh --provider {provider_name}"
         );
+        println!();
         return Ok(());
     };
 
+    println!();
     println!(
-        "Cached models for '{}' ({} total, updated {} ago):",
-        provider_name,
+        "  {} models for '{}' (cached {} ago):",
         cached.models.len(),
+        provider_name,
         humanize_age(cached.age_secs)
     );
-
-    let mut marked_default = false;
+    println!();
     for model in &cached.models {
-        let is_default = current_default_model.is_some_and(|current| current == model);
-        if is_default {
-            marked_default = true;
-        }
-
-        let marker = if is_default { "*" } else { " " };
-        println!("  {marker} {model}");
+        let marker = if config.default_model.as_deref() == Some(model.as_str()) {
+            "* "
+        } else {
+            "  "
+        };
+        println!("  {marker}{model}");
     }
-
-    if let Some(current_default) = current_default_model {
-        if !marked_default {
-            println!();
-            println!(
-                "Current default model is not present in '{}' cache: {}",
-                provider_name, current_default
-            );
-        }
-    }
-
+    println!();
     Ok(())
 }
 
 pub async fn run_models_set(config: &Config, model: &str) -> Result<()> {
-    let trimmed = model.trim();
-    if trimmed.is_empty() {
-        bail!("Model ID cannot be empty. Pass a non-empty value to `zeroclaw models set`.");
+    let model = model.trim();
+    if model.is_empty() {
+        anyhow::bail!("Model name cannot be empty");
     }
 
-    let previous = resolved_default_model(config).map(ToString::to_string);
     let mut updated = config.clone();
-    updated.default_model = Some(trimmed.to_string());
-    updated
-        .save()
-        .await
-        .context("failed to save config after updating default_model")?;
+    updated.default_model = Some(model.to_string());
+    updated.save().await?;
 
-    let provider_name = resolve_models_provider(&updated, None)?;
-    println!("Updated default model for provider '{}':", provider_name);
-    match previous {
-        Some(old) => println!("  {old} -> {trimmed}"),
-        None => println!("  (unset) -> {trimmed}"),
-    }
-
+    println!();
+    println!("  Default model set to '{}'.", style(model).green().bold());
+    println!();
     Ok(())
 }
 
 pub async fn run_models_status(config: &Config) -> Result<()> {
-    let provider_name = resolve_models_provider(config, None)?;
-    let current_model = resolved_default_model(config).unwrap_or("(unset)");
-    let cache_path = model_cache_path(&config.workspace_dir);
-    let cache_file_bytes = fs::metadata(&cache_path).await.ok().map(|m| m.len());
+    let provider = config.default_provider.as_deref().unwrap_or("openrouter");
+    let model = config.default_model.as_deref().unwrap_or("(not set)");
 
-    println!("Model configuration status:");
-    println!("  Provider: {provider_name}");
-    println!("  Model: {current_model}");
-    println!("  Temperature: {}", config.default_temperature);
+    println!();
+    println!("  Provider:  {}", style(provider).cyan());
+    println!("  Model:     {}", style(model).cyan());
     println!(
-        "  Cache file: {}",
-        if cache_path.exists() {
-            cache_path.display().to_string()
-        } else {
-            format!("{} (missing)", cache_path.display())
-        }
-    );
-    println!(
-        "  Cache size (bytes): {}",
-        cache_file_bytes.map_or_else(|| "n/a".to_string(), |bytes| bytes.to_string())
+        "  Temp:      {}",
+        style(format!("{:.1}", config.default_temperature)).cyan()
     );
 
-    match load_any_cached_models_for_provider(&config.workspace_dir, &provider_name).await? {
+    match load_any_cached_models_for_provider(&config.workspace_dir, provider).await? {
         Some(cached) => {
-            let freshness = if cached.age_secs <= MODEL_CACHE_TTL_SECS {
-                "fresh"
-            } else {
-                "stale"
-            };
-            println!("  Cache size (models): {}", cached.models.len());
-            println!("  Cache age: {}", humanize_age(cached.age_secs));
             println!(
-                "  Cache freshness: {} (TTL: {}h)",
-                freshness,
-                MODEL_CACHE_TTL_SECS / 3600
+                "  Cache:     {} models (updated {} ago)",
+                cached.models.len(),
+                humanize_age(cached.age_secs)
             );
+            let fresh = cached.age_secs < MODEL_CACHE_TTL_SECS;
+            if fresh {
+                println!("  Freshness: {}", style("fresh").green());
+            } else {
+                println!("  Freshness: {}", style("stale").yellow());
+            }
         }
         None => {
-            println!("  Cache size (models): 0");
-            println!("  Cache age: n/a");
-            println!("  Cache freshness: missing");
-            println!(
-                "  Tip: run `zeroclaw models refresh --provider {provider_name}` to create cache."
-            );
+            println!("  Cache:     {}", style("none").yellow());
         }
     }
 
+    println!();
     Ok(())
 }
 
@@ -3451,7 +3370,9 @@ fn setup_channels() -> Result<ChannelsConfig> {
                 ),
                 ChannelMenuChoice::Feishu => format!(
                     "Feishu     {}",
-                    if config.lark.as_ref().is_some_and(|cfg| cfg.use_feishu) {
+                    if config.feishu.is_some()
+                        || config.lark.as_ref().is_some_and(|cfg| cfg.use_feishu)
+                    {
                         "✅ connected"
                     } else {
                         "— Feishu Bot"
@@ -3572,7 +3493,6 @@ fn setup_channels() -> Result<ChannelsConfig> {
 
                 config.telegram = Some(TelegramConfig {
                     bot_token: token,
-                    base_url: None,
                     allowed_users,
                     stream_mode: StreamMode::default(),
                     draft_update_interval_ms: 1000,
@@ -4054,14 +3974,6 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     allowed_from,
                     ignore_attachments,
                     ignore_stories,
-                    pin_verification: true,
-                    pin_reverify_days: 7,
-                    pin_adaptive_schedule: true,
-                    pin_reminder_hours_before: 12,
-                    pin_max_failed_attempts: 5,
-                    pin_lockout_minutes: 30,
-                    pin_min_length: 4,
-                    pin_allow_alphanumeric: true,
                 });
 
                 println!("  {} Signal configured", style("✅").green().bold());
@@ -5459,7 +5371,6 @@ async fn scaffold_workspace(workspace_dir: &Path, ctx: &ProjectContext) -> Resul
 #[allow(clippy::too_many_lines)]
 fn print_summary(config: &Config) {
     let has_channels = has_launchable_channels(&config.channels_config);
-    let docker_hint = docker_host_run_hint();
 
     println!();
     println!(
@@ -5602,29 +5513,8 @@ fn print_summary(config: &Config) {
     println!();
     println!("  {}", style("Next steps:").white().bold());
     println!();
-    if docker_hint.is_some() {
-        println!(
-            "  {}",
-            style("Docker bootstrap mode detected: run the commands below from your host shell.")
-                .dim()
-        );
-        println!();
-    }
 
     let mut step = 1u8;
-    let auth_cmd = format_zeroclaw_command(
-        "auth login --provider openai-codex --device-code",
-        docker_hint.as_deref(),
-    );
-    let paste_token_cmd = format_zeroclaw_command(
-        "auth paste-token --provider anthropic --auth-kind authorization",
-        docker_hint.as_deref(),
-    );
-    let channel_start_cmd = format_zeroclaw_command("channel start", docker_hint.as_deref());
-    let quick_message_cmd =
-        format_zeroclaw_command("agent -m \"Hello, ZeroClaw!\"", docker_hint.as_deref());
-    let interactive_cmd = format_zeroclaw_command("agent", docker_hint.as_deref());
-    let status_cmd = format_zeroclaw_command("status", docker_hint.as_deref());
 
     let provider = config.default_provider.as_deref().unwrap_or("openrouter");
     if config.api_key.is_none() && !provider_supports_keyless_local_usage(provider) {
@@ -5633,7 +5523,10 @@ fn print_summary(config: &Config) {
                 "    {} Authenticate OpenAI Codex:",
                 style(format!("{step}.")).cyan().bold()
             );
-            println!("       {}", style(auth_cmd).yellow());
+            println!(
+                "       {}",
+                style("zeroclaw auth login --provider openai-codex --device-code").yellow()
+            );
         } else if provider == "anthropic" {
             println!(
                 "    {} Configure Anthropic auth:",
@@ -5645,7 +5538,10 @@ fn print_summary(config: &Config) {
             );
             println!(
                 "       {}",
-                style(format!("or: {paste_token_cmd}")).yellow()
+                style(
+                    "or: zeroclaw auth paste-token --provider anthropic --auth-kind authorization"
+                )
+                .yellow()
             );
         } else {
             let env_var = provider_env_var(provider);
@@ -5669,7 +5565,7 @@ fn print_summary(config: &Config) {
             style(format!("{step}.")).cyan().bold(),
             style("Launch your channels").white().bold()
         );
-        println!("       {}", style(channel_start_cmd).yellow());
+        println!("       {}", style("zeroclaw channel start").yellow());
         println!();
         step += 1;
     }
@@ -5678,7 +5574,10 @@ fn print_summary(config: &Config) {
         "    {} Send a quick message:",
         style(format!("{step}.")).cyan().bold()
     );
-    println!("       {}", style(quick_message_cmd).yellow());
+    println!(
+        "       {}",
+        style("zeroclaw agent -m \"Hello, ZeroClaw!\"").yellow()
+    );
     println!();
     step += 1;
 
@@ -5686,7 +5585,7 @@ fn print_summary(config: &Config) {
         "    {} Start interactive CLI mode:",
         style(format!("{step}.")).cyan().bold()
     );
-    println!("       {}", style(interactive_cmd).yellow());
+    println!("       {}", style("zeroclaw agent").yellow());
     println!();
     step += 1;
 
@@ -5694,7 +5593,7 @@ fn print_summary(config: &Config) {
         "    {} Check full status:",
         style(format!("{step}.")).cyan().bold()
     );
-    println!("       {}", style(status_cmd).yellow());
+    println!("       {}", style("zeroclaw status").yellow());
 
     println!();
     println!(
@@ -6963,68 +6862,6 @@ mod tests {
             .contains("does not support live model discovery"));
     }
 
-    #[tokio::test]
-    async fn run_models_list_handles_missing_cache() {
-        let tmp = TempDir::new().unwrap();
-        let config = Config {
-            workspace_dir: tmp.path().to_path_buf(),
-            default_provider: Some("openai".to_string()),
-            default_model: Some("gpt-5.1".to_string()),
-            config_path: tmp.path().join("config.toml"),
-            ..Config::default()
-        };
-
-        run_models_list(&config, None).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn run_models_status_handles_missing_cache() {
-        let tmp = TempDir::new().unwrap();
-        let config = Config {
-            workspace_dir: tmp.path().to_path_buf(),
-            default_provider: Some("openai".to_string()),
-            default_model: Some("gpt-5.1".to_string()),
-            config_path: tmp.path().join("config.toml"),
-            ..Config::default()
-        };
-
-        run_models_status(&config).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn run_models_set_rejects_empty_model() {
-        let tmp = TempDir::new().unwrap();
-        let config = Config {
-            workspace_dir: tmp.path().to_path_buf(),
-            config_path: tmp.path().join("config.toml"),
-            ..Config::default()
-        };
-
-        let err = run_models_set(&config, "   ").await.unwrap_err();
-        assert!(err.to_string().contains("Model ID cannot be empty"));
-    }
-
-    #[tokio::test]
-    async fn run_models_set_updates_default_model_in_config() {
-        let tmp = TempDir::new().unwrap();
-        let config_path = tmp.path().join("config.toml");
-        let config = Config {
-            workspace_dir: tmp.path().to_path_buf(),
-            config_path: config_path.clone(),
-            default_provider: Some("openai".to_string()),
-            default_model: Some("gpt-5-mini".to_string()),
-            ..Config::default()
-        };
-
-        run_models_set(&config, "gpt-5.1").await.unwrap();
-
-        let saved = std::fs::read_to_string(&config_path).unwrap();
-        assert!(
-            saved.contains("default_model = \"gpt-5.1\""),
-            "saved config should contain updated default_model, got:\n{saved}"
-        );
-    }
-
     // ── provider_env_var ────────────────────────────────────────
 
     #[test]
@@ -7157,14 +6994,6 @@ mod tests {
             allowed_from: vec!["*".into()],
             ignore_attachments: false,
             ignore_stories: true,
-            pin_verification: true,
-            pin_reverify_days: 7,
-            pin_adaptive_schedule: true,
-            pin_reminder_hours_before: 12,
-            pin_max_failed_attempts: 5,
-            pin_lockout_minutes: 30,
-            pin_min_length: 4,
-            pin_allow_alphanumeric: true,
         });
         assert!(has_launchable_channels(&channels));
 
@@ -7197,13 +7026,12 @@ mod tests {
         assert!(has_launchable_channels(&channels));
 
         channels.nextcloud_talk = None;
-        channels.lark = Some(crate::config::schema::LarkConfig {
+        channels.feishu = Some(crate::config::schema::FeishuConfig {
             app_id: "cli_123".into(),
             app_secret: "secret".into(),
             encrypt_key: None,
             verification_token: None,
             allowed_users: vec!["*".into()],
-            use_feishu: true,
             receive_mode: crate::config::schema::LarkReceiveMode::Websocket,
             port: None,
         });

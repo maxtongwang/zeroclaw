@@ -6,7 +6,6 @@ pub mod hygiene;
 pub mod lucid;
 pub mod markdown;
 pub mod none;
-pub mod plugin;
 #[cfg(feature = "memory-postgres")]
 pub mod postgres;
 pub mod response_cache;
@@ -32,7 +31,6 @@ pub use traits::Memory;
 pub use traits::{MemoryCategory, MemoryEntry};
 
 use crate::config::{EmbeddingRouteConfig, MemoryConfig, StorageProviderConfig};
-use crate::plugins::PluginRegistry;
 #[cfg(feature = "memory-postgres")]
 use anyhow::Context;
 use std::path::Path;
@@ -196,19 +194,6 @@ pub fn create_memory_with_storage_and_routes(
     api_key: Option<&str>,
 ) -> anyhow::Result<Box<dyn Memory>> {
     let backend_name = effective_memory_backend_name(&config.backend, storage_provider);
-    if let Some(plugin_id) = backend_name.strip_prefix("plugin:").map(str::trim) {
-        let registry = PluginRegistry::from_runtime(workspace_dir)?;
-        if let Some(plugin) = registry.memory(plugin_id) {
-            tracing::info!(plugin_id = %plugin.id, "Using external memory plugin backend");
-            return Ok(Box::new(plugin::CommandPluginMemory::new(plugin.clone())));
-        }
-        tracing::warn!(
-            plugin_id,
-            "Memory plugin backend not found or not enabled; falling back to markdown"
-        );
-        return Ok(Box::new(MarkdownMemory::new(workspace_dir)));
-    }
-
     let backend_kind = classify_memory_backend(&backend_name);
     let resolved_embedding = resolve_embedding_config(config, embedding_routes, api_key);
 

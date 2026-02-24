@@ -9,7 +9,6 @@ Last verified: **February 21, 2026**.
 | Command | Purpose |
 |---|---|
 | `onboard` | Initialize workspace/config quickly or interactively |
-| `update` | Self-update from latest GitHub pre-built release binary |
 | `agent` | Run interactive chat or single-message mode |
 | `gateway` | Start webhook and WhatsApp HTTP gateway |
 | `daemon` | Start supervised runtime (gateway + channels + optional heartbeat/scheduler) |
@@ -48,17 +47,6 @@ Last verified: **February 21, 2026**.
   - Provider-only update (update provider/model/API key while preserving existing channels, tunnel, memory, hooks, and other settings)
 - In non-interactive environments, existing `config.toml` causes a safe refusal unless `--force` is passed.
 - Use `zeroclaw onboard --channels-only` when you only need to rotate channel tokens/allowlists.
-
-### `update`
-
-- `zeroclaw update`
-
-`update` downloads the latest GitHub release archive for the current platform and replaces the running `zeroclaw` binary in place.
-
-Notes:
-
-- Currently supports pre-built targets: Linux (`x86_64`, `aarch64`, `armv7`) and macOS (`x86_64`, `aarch64`).
-- If your binary was installed by a system package manager and is not writable, use that package manager's upgrade path instead.
 
 ### `agent`
 

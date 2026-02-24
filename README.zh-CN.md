@@ -1,8 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="zeroclaw-dark.png" />
-    <img src="zeroclaw-icon.png" alt="ZeroClaw" width="188" />
-  </picture>
+  <img src="zeroclaw.png" alt="ZeroClaw" width="200" />
 </p>
 
 <h1 align="center">ZeroClaw 🦀（简体中文）</h1>

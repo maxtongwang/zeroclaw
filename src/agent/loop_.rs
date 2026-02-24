@@ -1,12 +1,13 @@
 use crate::approval::{ApprovalManager, ApprovalRequest, ApprovalResponse};
-use crate::bootstrap;
 use crate::config::Config;
 use crate::memory::{self, Memory, MemoryCategory};
 use crate::multimodal;
-use crate::observability::{runtime_trace, Observer, ObserverEvent};
+use crate::observability::{self, runtime_trace, Observer, ObserverEvent};
 use crate::providers::{
     self, ChatMessage, ChatRequest, Provider, ProviderCapabilityError, ToolCall,
 };
+use crate::runtime;
+use crate::security::SecurityPolicy;
 use crate::tools::{self, Tool};
 use crate::util::truncate_with_ellipsis;
 use anyhow::Result;
@@ -1493,6 +1494,59 @@ fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
         }
     }
 
+    // Try ```tool <name> format used by some providers (e.g., xAI grok)
+    // Example: ```tool file_write\n{"path": "...", "content": "..."}\n```
+    if calls.is_empty() {
+        static MD_TOOL_NAME_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"(?s)```tool\s+(\w+)\s*\n(.*?)(?:```|$)").unwrap());
+        let mut md_text_parts: Vec<String> = Vec::new();
+        let mut last_end = 0;
+
+        for cap in MD_TOOL_NAME_RE.captures_iter(response) {
+            let full_match = cap.get(0).unwrap();
+            let before = &response[last_end..full_match.start()];
+            if !before.trim().is_empty() {
+                md_text_parts.push(before.trim().to_string());
+            }
+            let tool_name = &cap[1];
+            let inner = &cap[2];
+
+            // Try to parse the inner content as JSON arguments
+            let json_values = extract_json_values(inner);
+            if !json_values.is_empty() {
+                for value in json_values {
+                    let arguments = if value.is_object() {
+                        value
+                    } else {
+                        serde_json::Value::Object(serde_json::Map::new())
+                    };
+                    calls.push(ParsedToolCall {
+                        name: tool_name.to_string(),
+                        arguments,
+                        tool_call_id: None,
+                    });
+                }
+            } else {
+                // Log a warning if we found a tool block but couldn't parse arguments
+                tracing::warn!(
+                    tool_name = %tool_name,
+                    inner = %inner.chars().take(100).collect::<String>(),
+                    "Found ```tool <name> block but could not parse JSON arguments"
+                );
+            }
+            last_end = full_match.end();
+        }
+
+        if !calls.is_empty() {
+            let after = &response[last_end..];
+            if !after.trim().is_empty() {
+                md_text_parts.push(after.trim().to_string());
+            }
+            text_parts = md_text_parts;
+            remaining = "";
+        }
+    }
+
     // XML attribute-style tool calls:
     // <minimax:toolcall>
     // <invoke name="shell">
@@ -1642,6 +1696,11 @@ fn detect_tool_call_parse_issue(response: &str, parsed_calls: &[ParsedToolCall])
         || trimmed.contains("```tool_call")
         || trimmed.contains("```toolcall")
         || trimmed.contains("```tool-call")
+        || trimmed.contains("```tool file_")
+        || trimmed.contains("```tool shell")
+        || trimmed.contains("```tool web_")
+        || trimmed.contains("```tool memory_")
+        || trimmed.contains("```tool ") // Generic ```tool <name> pattern
         || trimmed.contains("\"tool_calls\"")
         || trimmed.contains("TOOL_CALL")
         || trimmed.contains("<FunctionCall>");
@@ -1668,7 +1727,11 @@ fn parse_structured_tool_calls(tool_calls: &[ToolCall]) -> Vec<ParsedToolCall> {
 /// Build assistant history entry in JSON format for native tool-call APIs.
 /// `convert_messages` in the OpenRouter provider parses this JSON to reconstruct
 /// the proper `NativeMessage` with structured `tool_calls`.
-fn build_native_assistant_history(text: &str, tool_calls: &[ToolCall]) -> String {
+fn build_native_assistant_history(
+    text: &str,
+    tool_calls: &[ToolCall],
+    reasoning_content: Option<&str>,
+) -> String {
     let calls_json: Vec<serde_json::Value> = tool_calls
         .iter()
         .map(|tc| {
@@ -1686,16 +1749,25 @@ fn build_native_assistant_history(text: &str, tool_calls: &[ToolCall]) -> String
         serde_json::Value::String(text.trim().to_string())
     };
 
-    serde_json::json!({
+    let mut obj = serde_json::json!({
         "content": content,
         "tool_calls": calls_json,
-    })
-    .to_string()
+    });
+
+    if let Some(rc) = reasoning_content {
+        obj.as_object_mut().unwrap().insert(
+            "reasoning_content".to_string(),
+            serde_json::Value::String(rc.to_string()),
+        );
+    }
+
+    obj.to_string()
 }
 
 fn build_native_assistant_history_from_parsed_calls(
     text: &str,
     tool_calls: &[ParsedToolCall],
+    reasoning_content: Option<&str>,
 ) -> Option<String> {
     let calls_json = tool_calls
         .iter()
@@ -1714,13 +1786,19 @@ fn build_native_assistant_history_from_parsed_calls(
         serde_json::Value::String(text.trim().to_string())
     };
 
-    Some(
-        serde_json::json!({
-            "content": content,
-            "tool_calls": calls_json,
-        })
-        .to_string(),
-    )
+    let mut obj = serde_json::json!({
+        "content": content,
+        "tool_calls": calls_json,
+    });
+
+    if let Some(rc) = reasoning_content {
+        obj.as_object_mut().unwrap().insert(
+            "reasoning_content".to_string(),
+            serde_json::Value::String(rc.to_string()),
+        );
+    }
+
+    Some(obj.to_string())
 }
 
 fn build_assistant_history_with_tool_calls(text: &str, tool_calls: &[ToolCall]) -> String {
@@ -2166,15 +2244,24 @@ pub(crate) async fn run_tool_call_loop(
 
                     // Preserve native tool call IDs in assistant history so role=tool
                     // follow-up messages can reference the exact call id.
+                    let reasoning_content = resp.reasoning_content.clone();
                     let assistant_history_content = if resp.tool_calls.is_empty() {
                         if use_native_tools {
-                            build_native_assistant_history_from_parsed_calls(&response_text, &calls)
-                                .unwrap_or_else(|| response_text.clone())
+                            build_native_assistant_history_from_parsed_calls(
+                                &response_text,
+                                &calls,
+                                reasoning_content.as_deref(),
+                            )
+                            .unwrap_or_else(|| response_text.clone())
                         } else {
                             response_text.clone()
                         }
                     } else {
-                        build_native_assistant_history(&response_text, &resp.tool_calls)
+                        build_native_assistant_history(
+                            &response_text,
+                            &resp.tool_calls,
+                            reasoning_content.as_deref(),
+                        )
                     };
 
                     let native_calls = resp.tool_calls;
@@ -2632,14 +2719,22 @@ pub async fn run(
     interactive: bool,
 ) -> Result<String> {
     // ── Wire up agnostic subsystems ──────────────────────────────
-    let bootstrap::CoreServices {
-        observer,
-        runtime,
-        security,
-        memory: mem,
-    } = bootstrap::build_core_services(&config)?;
+    let base_observer = observability::create_observer(&config.observability);
+    let observer: Arc<dyn Observer> = Arc::from(base_observer);
+    let runtime: Arc<dyn runtime::RuntimeAdapter> =
+        Arc::from(runtime::create_runtime(&config.runtime)?);
+    let security = Arc::new(SecurityPolicy::from_config(
+        &config.autonomy,
+        &config.workspace_dir,
+    ));
 
     // ── Memory (the brain) ────────────────────────────────────────
+    let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage(
+        &config.memory,
+        Some(&config.storage.provider.config),
+        &config.workspace_dir,
+        config.api_key.as_deref(),
+    )?);
     tracing::info!(backend = mem.name(), "Memory initialized");
 
     // ── Peripherals (merge peripheral tools into registry) ─
@@ -2651,48 +2746,14 @@ pub async fn run(
     }
 
     // ── Tools (including memory tools and peripherals) ────────────
-    let (composio_key, composio_entity_id) = bootstrap::composio_credentials(&config);
-    // Pre-create SOP engine so the agent loop can poll approval timeouts
-    let sop_engine = tools::create_sop_engine(&config.sop, &config.workspace_dir);
-    let sop_audit = sop_engine
-        .as_ref()
-        .map(|_| Arc::new(crate::sop::SopAuditLogger::new(mem.clone())));
-
-    // Warm-start SOP metrics collector from Memory (async, O(n) scan — acceptable at startup)
-    let sop_collector: Option<Arc<crate::sop::SopMetricsCollector>> = if sop_engine.is_some() {
-        Some(Arc::new(
-            crate::sop::SopMetricsCollector::rebuild_from_memory(mem.as_ref())
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!("SOP metrics warm-start failed, using empty collector: {e}");
-                    crate::sop::SopMetricsCollector::new()
-                }),
-        ))
-    } else {
-        None
-    };
-
-    // Gate evaluation state (standalone mode — creates its own instance)
-    #[cfg(feature = "ampersona-gates")]
-    let gate_eval: Option<Arc<crate::sop::GateEvalState>> = if sop_engine.is_some() {
-        match crate::sop::GateEvalState::rebuild_from_memory(
-            mem.clone(),
-            "zeroclaw",
-            config.sop.gates_file.as_deref().map(std::path::Path::new),
-            config.sop.gate_eval_interval_secs,
+    let (composio_key, composio_entity_id) = if config.composio.enabled {
+        (
+            config.composio.api_key.as_deref(),
+            Some(config.composio.entity_id.as_str()),
         )
-        .await
-        {
-            Ok(g) => Some(Arc::new(g)),
-            Err(e) => {
-                tracing::warn!("Gate eval warm-start failed: {e}");
-                None
-            }
-        }
     } else {
-        None
+        (None, None)
     };
-
     let mut tools_registry = tools::all_tools_with_runtime(
         Arc::new(config.clone()),
         &security,
@@ -2707,12 +2768,6 @@ pub async fn run(
         &config.agents,
         config.api_key.as_deref(),
         &config,
-        sop_engine.clone(),
-        sop_collector.clone(),
-        #[cfg(feature = "ampersona-gates")]
-        gate_eval.clone(),
-        #[cfg(not(feature = "ampersona-gates"))]
-        None,
     );
 
     let peripheral_tools: Vec<Box<dyn Tool>> =
@@ -2733,7 +2788,12 @@ pub async fn run(
         .or(config.default_model.as_deref())
         .unwrap_or("anthropic/claude-sonnet-4");
 
-    let provider_runtime_options = bootstrap::provider_runtime_options(&config);
+    let provider_runtime_options = providers::ProviderRuntimeOptions {
+        auth_profile_override: None,
+        zeroclaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
+        secrets_encrypt: config.secrets.encrypt,
+        reasoning_enabled: config.runtime.reasoning_enabled,
+    };
 
     let provider: Box<dyn Provider> = providers::create_routed_provider_with_options(
         provider_name,
@@ -2989,73 +3049,6 @@ pub async fn run(
                 }
             }
 
-            // Check SOP approval timeouts between turns
-            if let Some(ref engine) = sop_engine {
-                // Lock scope: extract actions + snapshots, then drop
-                let (actions, audit_runs) = match engine.lock() {
-                    Ok(mut e) => {
-                        let actions = e.check_approval_timeouts();
-                        let mut runs = Vec::new();
-                        for action in &actions {
-                            if let crate::sop::SopRunAction::ExecuteStep { run_id, .. } = action {
-                                if let Some(run) = e.get_run(run_id).cloned() {
-                                    runs.push(run);
-                                }
-                            }
-                        }
-                        (actions, runs)
-                    }
-                    Err(_) => (Vec::new(), Vec::new()),
-                };
-                // Engine lock dropped — safe to push history and await audit
-                for action in &actions {
-                    let msg = match action {
-                        crate::sop::SopRunAction::ExecuteStep {
-                            run_id, context, ..
-                        } => {
-                            format!(
-                                "[SOP timeout auto-approved] Run {run_id} ready to execute:\n\n{context}"
-                            )
-                        }
-                        _ => continue,
-                    };
-                    tracing::info!("SOP approval timeout fired: injecting into agent context");
-                    history.push(ChatMessage::system(&msg));
-                }
-                if let Some(ref audit) = sop_audit {
-                    for run in &audit_runs {
-                        if let Err(e) = audit.log_timeout_auto_approve(run, run.current_step).await
-                        {
-                            tracing::warn!("SOP audit log for timeout auto-approve failed: {e}");
-                        }
-                    }
-                }
-                if let Some(ref collector) = sop_collector {
-                    for run in &audit_runs {
-                        collector.record_timeout_auto_approve(&run.sop_name, &run.run_id);
-                    }
-                }
-            }
-
-            // Gate evaluation tick
-            #[cfg(feature = "ampersona-gates")]
-            if let (Some(ref ge), Some(ref collector)) = (&gate_eval, &sop_collector) {
-                if let Some(record) = ge.tick(collector.as_ref()) {
-                    if let Some(ref audit) = sop_audit {
-                        if let Err(e) = audit.log_gate_decision(&record).await {
-                            tracing::warn!(
-                                gate_id = %record.gate_id,
-                                error = %e,
-                                "failed to log gate decision"
-                            );
-                        }
-                    }
-                    if let Err(e) = ge.persist().await {
-                        tracing::warn!(error = %e, "failed to persist gate phase state");
-                    }
-                }
-            }
-
             let user_input = input.trim().to_string();
             if user_input.is_empty() {
                 continue;
@@ -3205,14 +3198,29 @@ pub async fn run(
 /// Process a single message through the full agent (with tools, peripherals, memory).
 /// Used by channels (Telegram, Discord, etc.) to enable hardware and tool use.
 pub async fn process_message(config: Config, message: &str) -> Result<String> {
-    let bootstrap::CoreServices {
-        observer,
-        runtime,
-        security,
-        memory: mem,
-    } = bootstrap::build_core_services(&config)?;
+    let observer: Arc<dyn Observer> =
+        Arc::from(observability::create_observer(&config.observability));
+    let runtime: Arc<dyn runtime::RuntimeAdapter> =
+        Arc::from(runtime::create_runtime(&config.runtime)?);
+    let security = Arc::new(SecurityPolicy::from_config(
+        &config.autonomy,
+        &config.workspace_dir,
+    ));
+    let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage(
+        &config.memory,
+        Some(&config.storage.provider.config),
+        &config.workspace_dir,
+        config.api_key.as_deref(),
+    )?);
 
-    let (composio_key, composio_entity_id) = bootstrap::composio_credentials(&config);
+    let (composio_key, composio_entity_id) = if config.composio.enabled {
+        (
+            config.composio.api_key.as_deref(),
+            Some(config.composio.entity_id.as_str()),
+        )
+    } else {
+        (None, None)
+    };
     let mut tools_registry = tools::all_tools_with_runtime(
         Arc::new(config.clone()),
         &security,
@@ -3227,12 +3235,6 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         &config.agents,
         config.api_key.as_deref(),
         &config,
-        None, // one-shot — no SOP timeout polling needed
-        None, // one-shot — no SOP metrics collector
-        #[cfg(feature = "ampersona-gates")]
-        None, // one-shot — no gate evaluation state
-        #[cfg(not(feature = "ampersona-gates"))]
-        None,
     );
     let peripheral_tools: Vec<Box<dyn Tool>> =
         crate::peripherals::create_peripheral_tools(&config.peripherals).await?;
@@ -3243,7 +3245,12 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         .default_model
         .clone()
         .unwrap_or_else(|| "anthropic/claude-sonnet-4-20250514".into());
-    let provider_runtime_options = bootstrap::provider_runtime_options(&config);
+    let provider_runtime_options = providers::ProviderRuntimeOptions {
+        auth_profile_override: None,
+        zeroclaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
+        secrets_encrypt: config.secrets.encrypt,
+        reasoning_enabled: config.runtime.reasoning_enabled,
+    };
     let provider: Box<dyn Provider> = providers::create_routed_provider_with_options(
         provider_name,
         config.api_key.as_deref(),
@@ -4291,6 +4298,64 @@ Done."#;
             "date"
         );
         assert!(text.contains("Checking."));
+        assert!(text.contains("Done."));
+    }
+
+    #[test]
+    fn parse_tool_calls_handles_tool_name_fence_format() {
+        // Issue #1420: xAI grok models use ```tool <name> format
+        let response = r#"I'll write a test file.
+```tool file_write
+{"path": "/home/user/test.txt", "content": "Hello world"}
+```
+Done."#;
+
+        let (text, calls) = parse_tool_calls(response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "file_write");
+        assert_eq!(
+            calls[0].arguments.get("path").unwrap().as_str().unwrap(),
+            "/home/user/test.txt"
+        );
+        assert!(text.contains("I'll write a test file."));
+        assert!(text.contains("Done."));
+    }
+
+    #[test]
+    fn parse_tool_calls_handles_tool_name_fence_shell() {
+        // Issue #1420: Test shell command in ```tool shell format
+        let response = r#"```tool shell
+{"command": "ls -la"}
+```"#;
+
+        let (_text, calls) = parse_tool_calls(response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(
+            calls[0].arguments.get("command").unwrap().as_str().unwrap(),
+            "ls -la"
+        );
+    }
+
+    #[test]
+    fn parse_tool_calls_handles_multiple_tool_name_fences() {
+        // Multiple tool calls in ```tool <name> format
+        let response = r#"First, I'll write a file.
+```tool file_write
+{"path": "/tmp/a.txt", "content": "A"}
+```
+Then read it.
+```tool file_read
+{"path": "/tmp/a.txt"}
+```
+Done."#;
+
+        let (text, calls) = parse_tool_calls(response);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "file_write");
+        assert_eq!(calls[1].name, "file_read");
+        assert!(text.contains("First, I'll write a file."));
+        assert!(text.contains("Then read it."));
         assert!(text.contains("Done."));
     }
 
@@ -5361,5 +5426,69 @@ Let me check the result."#;
         // Tool names with special characters should be rejected
         assert!(parse_glm_shortened_body("not-a-tool>value").is_none());
         assert!(parse_glm_shortened_body("tool name>value").is_none());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // reasoning_content pass-through tests for history builders
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn build_native_assistant_history_includes_reasoning_content() {
+        let calls = vec![ToolCall {
+            id: "call_1".into(),
+            name: "shell".into(),
+            arguments: "{}".into(),
+        }];
+        let result = build_native_assistant_history("answer", &calls, Some("thinking step"));
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["content"].as_str(), Some("answer"));
+        assert_eq!(parsed["reasoning_content"].as_str(), Some("thinking step"));
+        assert!(parsed["tool_calls"].is_array());
+    }
+
+    #[test]
+    fn build_native_assistant_history_omits_reasoning_content_when_none() {
+        let calls = vec![ToolCall {
+            id: "call_1".into(),
+            name: "shell".into(),
+            arguments: "{}".into(),
+        }];
+        let result = build_native_assistant_history("answer", &calls, None);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["content"].as_str(), Some("answer"));
+        assert!(parsed.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn build_native_assistant_history_from_parsed_calls_includes_reasoning_content() {
+        let calls = vec![ParsedToolCall {
+            name: "shell".into(),
+            arguments: serde_json::json!({"command": "pwd"}),
+            tool_call_id: Some("call_2".into()),
+        }];
+        let result = build_native_assistant_history_from_parsed_calls(
+            "answer",
+            &calls,
+            Some("deep thought"),
+        );
+        assert!(result.is_some());
+        let parsed: serde_json::Value = serde_json::from_str(result.as_deref().unwrap()).unwrap();
+        assert_eq!(parsed["content"].as_str(), Some("answer"));
+        assert_eq!(parsed["reasoning_content"].as_str(), Some("deep thought"));
+        assert!(parsed["tool_calls"].is_array());
+    }
+
+    #[test]
+    fn build_native_assistant_history_from_parsed_calls_omits_reasoning_content_when_none() {
+        let calls = vec![ParsedToolCall {
+            name: "shell".into(),
+            arguments: serde_json::json!({"command": "pwd"}),
+            tool_call_id: Some("call_2".into()),
+        }];
+        let result = build_native_assistant_history_from_parsed_calls("answer", &calls, None);
+        assert!(result.is_some());
+        let parsed: serde_json::Value = serde_json::from_str(result.as_deref().unwrap()).unwrap();
+        assert_eq!(parsed["content"].as_str(), Some("answer"));
+        assert!(parsed.get("reasoning_content").is_none());
     }
 }

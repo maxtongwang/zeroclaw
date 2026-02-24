@@ -264,7 +264,6 @@ impl ModelRoutingConfigTool {
                     "provider": agent.provider,
                     "model": agent.model,
                     "system_prompt": agent.system_prompt,
-                    "api_url": agent.api_url,
                     "api_key_configured": agent
                         .api_key
                         .as_ref()
@@ -612,7 +611,6 @@ impl ModelRoutingConfigTool {
 
         let system_prompt_update = Self::parse_optional_string_update(args, "system_prompt")?;
         let api_key_update = Self::parse_optional_string_update(args, "api_key")?;
-        let api_url_update = Self::parse_optional_string_update(args, "api_url")?;
         let temperature_update = Self::parse_optional_f64_update(args, "temperature")?;
         let max_depth_update = Self::parse_optional_u32_update(args, "max_depth")?;
         let max_iterations_update = Self::parse_optional_usize_update(args, "max_iterations")?;
@@ -635,7 +633,6 @@ impl ModelRoutingConfigTool {
                 model: model.clone(),
                 system_prompt: None,
                 api_key: None,
-                api_url: None,
                 temperature: None,
                 max_depth: DEFAULT_AGENT_MAX_DEPTH,
                 agentic: false,
@@ -655,12 +652,6 @@ impl ModelRoutingConfigTool {
         match api_key_update {
             MaybeSet::Set(value) => next_agent.api_key = Some(value),
             MaybeSet::Null => next_agent.api_key = None,
-            MaybeSet::Unset => {}
-        }
-
-        match api_url_update {
-            MaybeSet::Set(value) => next_agent.api_url = Some(value),
-            MaybeSet::Null => next_agent.api_url = None,
             MaybeSet::Unset => {}
         }
 
@@ -791,10 +782,6 @@ impl Tool for ModelRoutingConfigTool {
                 "api_key": {
                     "type": ["string", "null"],
                     "description": "Optional API key override for scenario route or delegate agent"
-                },
-                "api_url": {
-                    "type": ["string", "null"],
-                    "description": "Optional API base URL override for delegate agents"
                 },
                 "keywords": {
                     "description": "Classification keywords for upsert_scenario (string or string array)",
@@ -1051,7 +1038,6 @@ mod tests {
                 "name": "coder",
                 "provider": "openai",
                 "model": "gpt-5.3-codex",
-                "api_url": "http://192.168.1.15:11434",
                 "agentic": true,
                 "allowed_tools": ["file_read", "file_write", "shell"],
                 "max_iterations": 6
@@ -1064,27 +1050,7 @@ mod tests {
         let output: Value = serde_json::from_str(&get_result.output).unwrap();
         assert_eq!(output["agents"]["coder"]["provider"], json!("openai"));
         assert_eq!(output["agents"]["coder"]["model"], json!("gpt-5.3-codex"));
-        assert_eq!(
-            output["agents"]["coder"]["api_url"],
-            json!("http://192.168.1.15:11434")
-        );
         assert_eq!(output["agents"]["coder"]["agentic"], json!(true));
-
-        let clear_url = tool
-            .execute(json!({
-                "action": "upsert_agent",
-                "name": "coder",
-                "provider": "openai",
-                "model": "gpt-5.3-codex",
-                "api_url": null
-            }))
-            .await
-            .unwrap();
-        assert!(clear_url.success, "{:?}", clear_url.error);
-
-        let get_result = tool.execute(json!({"action": "get"})).await.unwrap();
-        let output: Value = serde_json::from_str(&get_result.output).unwrap();
-        assert!(output["agents"]["coder"]["api_url"].is_null());
 
         let remove = tool
             .execute(json!({

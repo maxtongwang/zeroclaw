@@ -152,24 +152,6 @@ Behavior:
 - `true`: sends `think: true`.
 - Unset: omits `think` and keeps Ollama/model defaults.
 
-### OpenAI Codex Reasoning Levels
-
-You can configure Codex reasoning effort per model in `config.toml`:
-
-```toml
-[provider.reasoning_level]
-default = "xhigh"
-"gpt-5-codex" = "high"
-"gpt-5.2-codex" = "medium"
-"openai-codex/gpt-5.3-codex" = "xhigh"
-```
-
-Notes:
-
-- Supported values: `minimal`, `low`, `medium`, `high`, `xhigh`.
-- Provider-qualified keys (`openai-codex/<model>`) override bare model keys.
-- Bare model keys override `default`.
-
 ### Kimi Code Notes
 
 - Provider ID: `kimi-code`

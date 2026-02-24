@@ -88,7 +88,6 @@ Cấu hình agent phụ (sub-agent). Mỗi khóa dưới `[agents]` định ngh�
 | `model` | _bắt buộc_ | Tên model cho agent phụ |
 | `system_prompt` | chưa đặt | System prompt tùy chỉnh cho agent phụ (tùy chọn) |
 | `api_key` | chưa đặt | API key tùy chỉnh (mã hóa khi `secrets.encrypt = true`) |
-| `api_url` | chưa đặt | URL API base tùy chỉnh cho agent phụ (ví dụ host Ollama từ xa) |
 | `temperature` | chưa đặt | Temperature tùy chỉnh cho agent phụ |
 | `max_depth` | `3` | Độ sâu đệ quy tối đa cho ủy quyền lồng nhau |
 | `agentic` | `false` | Bật chế độ vòng lặp tool-call nhiều lượt cho agent phụ |
@@ -113,7 +112,6 @@ max_iterations = 8
 
 [agents.coder]
 provider = "ollama"
-api_url = "http://192.168.1.15:11434"
 model = "qwen2.5-coder:32b"
 temperature = 0.2
 ```
@@ -160,31 +158,6 @@ Lưu ý:
 - ZeroClaw yêu cầu Composio v3 tools với `toolkit_versions=latest` và thực thi với `version="latest"` để tránh bản tool mặc định cũ.
 - Luồng thông thường: gọi `connect`, hoàn tất OAuth trên trình duyệt, rồi chạy `execute` cho hành động mong muốn.
 - Nếu Composio trả lỗi thiếu connected-account, gọi `list_accounts` (tùy chọn với `app`) và truyền `connected_account_id` trả về cho `execute`.
-
-## `[mcp]`
-
-| Khóa | Mặc định | Mục đích |
-|---|---|---|
-| `enabled` | `false` | Bật xử lý cấu hình MCP server bên ngoài |
-| `servers` | `{}` | Danh sách server MCP theo tên |
-
-Các khóa trong `mcp.servers.<name>`:
-
-| Khóa | Mặc định | Mục đích |
-|---|---|---|
-| `enabled` | `true` | Bật/tắt cấu hình server cụ thể |
-| `command` | chưa đặt | Lệnh cho transport stdio (ví dụ `npx`) |
-| `args` | `[]` | Tham số cho transport stdio |
-| `url` | chưa đặt | Endpoint MCP remote (`http://` hoặc `https://`) |
-| `headers` | `{}` | Header tĩnh tùy chọn cho transport remote |
-| `timeout_secs` | `30` | Giới hạn timeout cho request/session |
-
-Lưu ý:
-
-- Mỗi server phải chọn đúng một transport: `command` (stdio) hoặc `url` (remote).
-- `mcp.enabled = true` yêu cầu có ít nhất một entry trong `mcp.servers`.
-- Tên server chỉ được chứa chữ cái, chữ số, `_` hoặc `-`.
-- Để tương thích cấu hình kiểu JSON, `mcp.mcpServers` được chấp nhận như bí danh của `mcp.servers`.
 
 ## `[cost]`
 
@@ -294,7 +267,6 @@ Lưu ý:
 | `workspace_only` | `true` | Giới hạn ghi/lệnh trong phạm vi workspace |
 | `allowed_commands` | _bắt buộc để chạy shell_ | Danh sách lệnh được phép |
 | `forbidden_paths` | `[]` | Danh sách đường dẫn bị cấm |
-| `allowed_roots` | `[]` | Root bổ sung ngoài workspace; khi khác rỗng sẽ giới hạn truy cập ngoài workspace theo các root này |
 | `max_actions_per_hour` | `100` | Ngân sách hành động mỗi giờ |
 | `max_cost_per_day_cents` | `1000` | Giới hạn chi tiêu mỗi ngày (cent) |
 | `require_approval_for_medium_risk` | `true` | Yêu cầu phê duyệt cho lệnh rủi ro trung bình |
@@ -305,8 +277,6 @@ Lưu ý:
 Lưu ý:
 
 - `level = "full"` bỏ qua phê duyệt rủi ro trung bình cho shell execution, nhưng vẫn áp dụng guardrail đã cấu hình.
-- Với `workspace_only = false` và `allowed_roots = []`, truy cập ngoài workspace được phép sau canonicalization (trừ các đường dẫn nằm trong `forbidden_paths`).
-- Khi `allowed_roots` khác rỗng, truy cập ngoài workspace chỉ được phép trong các root này.
 - Phân tích toán tử/dấu phân cách shell nhận biết dấu ngoặc kép. Ký tự như `;` trong đối số được trích dẫn được xử lý là ký tự, không phải dấu phân cách lệnh.
 - Toán tử chuỗi shell không trích dẫn vẫn được kiểm tra bởi policy (`;`, `|`, `&&`, `||`, chạy nền và chuyển hướng).
 

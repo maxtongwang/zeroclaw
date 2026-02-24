@@ -98,14 +98,9 @@ pub fn contains_image_markers(messages: &[ChatMessage]) -> bool {
 }
 
 pub fn extract_ollama_image_payload(image_ref: &str) -> Option<String> {
-    let trimmed = image_ref.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if trimmed.starts_with("data:") {
-        let comma_idx = trimmed.find(',')?;
-        let (_, payload) = trimmed.split_at(comma_idx + 1);
+    if image_ref.starts_with("data:") {
+        let comma_idx = image_ref.find(',')?;
+        let (_, payload) = image_ref.split_at(comma_idx + 1);
         let payload = payload.trim();
         if payload.is_empty() {
             None
@@ -113,18 +108,7 @@ pub fn extract_ollama_image_payload(image_ref: &str) -> Option<String> {
             Some(payload.to_string())
         }
     } else {
-        // Defensive fallback for call paths that still pass local file markers
-        // directly to provider conversion: Ollama expects base64 image bytes.
-        let path = Path::new(trimmed);
-        if path.exists() && path.is_file() {
-            if let Ok(bytes) = std::fs::read(path) {
-                if !bytes.is_empty() {
-                    return Some(STANDARD.encode(bytes));
-                }
-            }
-        }
-
-        Some(trimmed.to_string())
+        Some(image_ref.trim().to_string()).filter(|value| !value.is_empty())
     }
 }
 
@@ -581,17 +565,5 @@ mod tests {
         let payload = extract_ollama_image_payload("data:image/png;base64,abcd==")
             .expect("payload should be extracted");
         assert_eq!(payload, "abcd==");
-    }
-
-    #[test]
-    fn extract_ollama_image_payload_base64_encodes_local_files() {
-        let temp = tempfile::tempdir().unwrap();
-        let image_path = temp.path().join("sample.png");
-        let bytes = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
-        std::fs::write(&image_path, bytes).unwrap();
-
-        let payload = extract_ollama_image_payload(&image_path.display().to_string())
-            .expect("local file payload should be extracted");
-        assert_eq!(payload, STANDARD.encode(bytes));
     }
 }

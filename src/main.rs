@@ -37,8 +37,6 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use dialoguer::{Input, Password};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -50,16 +48,7 @@ fn parse_temperature(s: &str) -> std::result::Result<f64, String> {
     Ok(t)
 }
 
-fn fmt_csv_or_none(values: Vec<String>) -> String {
-    if values.is_empty() {
-        "(none)".to_string()
-    } else {
-        values.join(", ")
-    }
-}
-
 mod agent;
-mod bootstrap;
 mod approval;
 mod auth;
 mod channels;
@@ -84,14 +73,12 @@ mod multimodal;
 mod observability;
 mod onboard;
 mod peripherals;
-mod plugins;
 mod providers;
 mod runtime;
 mod security;
 mod service;
 mod skillforge;
 mod skills;
-mod sop;
 mod tools;
 mod tunnel;
 mod util;
@@ -101,7 +88,7 @@ use config::Config;
 // Re-export so binary modules can use crate::<CommandEnum> while keeping a single source of truth.
 pub use zeroclaw::{
     ChannelCommands, CronCommands, HardwareCommands, IntegrationCommands, MigrateCommands,
-    PeripheralCommands, ServiceCommands, SignalChannelCommands, SkillCommands, SopCommands,
+    PeripheralCommands, ServiceCommands, SkillCommands,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -277,17 +264,6 @@ Examples:
     /// Show system status (full details)
     Status,
 
-    /// Self-update from the latest pre-built GitHub release binary
-    #[command(long_about = "\
-Self-update ZeroClaw from the latest pre-built GitHub release binary.
-
-Downloads the release archive for your current platform/architecture and
-replaces the currently running `zeroclaw` executable in place.
-
-Example:
-  zeroclaw update")]
-    Update,
-
     /// Engage, inspect, and resume emergency-stop states.
     ///
     /// Examples:
@@ -379,12 +355,6 @@ Examples:
     Skills {
         #[command(subcommand)]
         skill_command: SkillCommands,
-    },
-
-    /// Manage SOPs (standard operating procedures)
-    Sop {
-        #[command(subcommand)]
-        sop_command: SopCommands,
     },
 
     /// Migrate data from other agent runtimes
@@ -609,18 +579,18 @@ enum ModelCommands {
         #[arg(long)]
         force: bool,
     },
-    /// List all cached models for a provider
+    /// List cached models for a provider
     List {
         /// Provider name (defaults to configured default provider)
         #[arg(long)]
         provider: Option<String>,
     },
-    /// Set default model in config.toml
+    /// Set the default model in config
     Set {
-        /// Model ID to set as default (non-empty)
+        /// Model name to set as default
         model: String,
     },
-    /// Show current provider/model and model-cache freshness
+    /// Show current model configuration and cache status
     Status,
 }
 
@@ -710,11 +680,6 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Self-update should not require config load.
-    if matches!(&cli.command, Commands::Update) {
-        return run_self_update().await;
-    }
-
     // Initialize logging - respects RUST_LOG env var, defaults to INFO
     let subscriber = fmt::Subscriber::builder()
         .with_env_filter(
@@ -799,7 +764,6 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Onboard { .. } => unreachable!(),
         Commands::Completions { .. } => unreachable!(),
-        Commands::Update => unreachable!(),
 
         Commands::Agent {
             message,
@@ -827,38 +791,7 @@ async fn main() -> Result<()> {
             } else {
                 info!("🚀 Starting ZeroClaw Gateway on {host}:{port}");
             }
-            // Initialize SOP resources so /sop/* and webhook dispatch work in standalone gateway
-            let sop_engine = tools::create_sop_engine(&config.sop, &config.workspace_dir);
-            let sop_memory: Option<std::sync::Arc<dyn memory::traits::Memory>> = if sop_engine
-                .is_some()
-            {
-                match memory::create_memory(&config.memory, &config.workspace_dir, None) {
-                    Ok(m) => {
-                        Some(std::sync::Arc::from(m) as std::sync::Arc<dyn memory::traits::Memory>)
-                    }
-                    Err(e) => {
-                        warn!("SOP enabled but memory backend init failed: {e}");
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            let sop_audit = sop_memory
-                .as_ref()
-                .map(|m| std::sync::Arc::new(sop::SopAuditLogger::new(std::sync::Arc::clone(m))));
-            let sop_collector = if let Some(ref mem) = sop_memory {
-                match sop::SopMetricsCollector::rebuild_from_memory(mem.as_ref()).await {
-                    Ok(c) => Some(std::sync::Arc::new(c)),
-                    Err(e) => {
-                        warn!("SOP metrics warm-start failed, using empty collector: {e}");
-                        Some(std::sync::Arc::new(sop::SopMetricsCollector::new()))
-                    }
-                }
-            } else {
-                None
-            };
-            gateway::run_gateway(&host, port, config, sop_engine, sop_audit, sop_collector).await
+            gateway::run_gateway(&host, port, config).await
         }
 
         Commands::Daemon { port, host } => {
@@ -911,57 +844,6 @@ async fn main() -> Result<()> {
                 effective_memory_backend,
                 if config.memory.auto_save { "on" } else { "off" }
             );
-            let enabled_mcp_servers = config.mcp.enabled_servers();
-            println!(
-                "🔌 MCP:            {} (configured servers: {})",
-                if config.mcp.enabled {
-                    "enabled"
-                } else {
-                    "disabled"
-                },
-                config.mcp.servers.len()
-            );
-            println!(
-                "   Active MCP:     {}",
-                if enabled_mcp_servers.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    enabled_mcp_servers
-                        .iter()
-                        .map(|(name, _)| (*name).to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                }
-            );
-            match plugins::PluginRegistry::from_runtime(&config.workspace_dir) {
-                Ok(registry) => {
-                    println!(
-                        "🧩 Plugins:        {} (configured: {}, active: {})",
-                        if config.plugins.enabled {
-                            "enabled"
-                        } else {
-                            "disabled"
-                        },
-                        config.plugins.registry.len(),
-                        registry.total()
-                    );
-                    println!(
-                        "   Memory plugins: {}",
-                        fmt_csv_or_none(registry.ids_by_kind(config::PluginKind::Memory))
-                    );
-                    println!(
-                        "   Channel plugins: {}",
-                        fmt_csv_or_none(registry.ids_by_kind(config::PluginKind::Channel))
-                    );
-                    println!(
-                        "   Security plugins: {}",
-                        fmt_csv_or_none(registry.ids_by_kind(config::PluginKind::Security))
-                    );
-                }
-                Err(error) => {
-                    println!("🧩 Plugins:        error loading plugins ({error})");
-                }
-            }
 
             println!();
             println!("Security:");
@@ -1110,8 +992,6 @@ async fn main() -> Result<()> {
 
         Commands::Skills { skill_command } => skills::handle_command(skill_command, &config),
 
-        Commands::Sop { sop_command } => sop::handle_command(sop_command, &config),
-
         Commands::Migrate { migrate_command } => {
             migration::handle_command(migrate_command, &config).await
         }
@@ -1141,202 +1021,6 @@ async fn main() -> Result<()> {
             }
         },
     }
-}
-
-const RELEASES_LATEST_DOWNLOAD_BASE: &str =
-    "https://github.com/zeroclaw-labs/zeroclaw/releases/latest/download";
-
-struct TempDirCleanup {
-    path: PathBuf,
-}
-
-impl TempDirCleanup {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
-}
-
-impl Drop for TempDirCleanup {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
-fn release_target_for(os: &str, arch: &str) -> Option<&'static str> {
-    match (os, arch) {
-        ("linux", "x86_64") => Some("x86_64-unknown-linux-gnu"),
-        ("linux", "aarch64") => Some("aarch64-unknown-linux-gnu"),
-        ("linux", "armv7") | ("linux", "arm") | ("linux", "armv6") => {
-            Some("armv7-unknown-linux-gnueabihf")
-        }
-        ("macos", "x86_64") => Some("x86_64-apple-darwin"),
-        ("macos", "aarch64") => Some("aarch64-apple-darwin"),
-        _ => None,
-    }
-}
-
-fn detect_release_target() -> Result<&'static str> {
-    let os = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
-    release_target_for(os, arch).ok_or_else(|| {
-        anyhow::anyhow!(
-            "No pre-built release target for {os}/{arch}. Supported: linux(x86_64,aarch64,armv7), macos(x86_64,aarch64)"
-        )
-    })
-}
-
-fn extract_release_archive(archive_path: &Path, extract_dir: &Path) -> Result<()> {
-    let status = Command::new("tar")
-        .arg("-xzf")
-        .arg(archive_path)
-        .arg("-C")
-        .arg(extract_dir)
-        .status()
-        .context("Failed to execute `tar` while extracting release archive")?;
-
-    if !status.success() {
-        bail!(
-            "Failed to extract release archive {} with `tar` (status: {status})",
-            archive_path.display()
-        );
-    }
-    Ok(())
-}
-
-fn find_extracted_binary(root_dir: &Path) -> Result<PathBuf> {
-    let direct = root_dir.join("zeroclaw");
-    if direct.is_file() {
-        return Ok(direct);
-    }
-
-    for entry in std::fs::read_dir(root_dir)
-        .with_context(|| format!("Failed to read extraction directory {}", root_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some("zeroclaw") {
-            return Ok(path);
-        }
-        if path.is_dir() {
-            let nested = path.join("zeroclaw");
-            if nested.is_file() {
-                return Ok(nested);
-            }
-        }
-    }
-
-    bail!(
-        "Release archive did not contain a `zeroclaw` executable in {}",
-        root_dir.display()
-    )
-}
-
-#[cfg(unix)]
-fn set_executable_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(path)
-        .with_context(|| format!("Failed to stat {}", path.display()))?
-        .permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms)
-        .with_context(|| format!("Failed to set executable permissions on {}", path.display()))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_executable_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-fn replace_current_executable(new_binary: &Path, current_exe: &Path) -> Result<()> {
-    let parent = current_exe
-        .parent()
-        .context("Current executable path has no parent directory")?;
-    let file_name = current_exe
-        .file_name()
-        .and_then(std::ffi::OsStr::to_str)
-        .unwrap_or("zeroclaw");
-    let staged_path = parent.join(format!(".{file_name}.update.new"));
-
-    std::fs::copy(new_binary, &staged_path).with_context(|| {
-        format!(
-            "Failed to stage updated binary from {} to {}",
-            new_binary.display(),
-            staged_path.display()
-        )
-    })?;
-    set_executable_permissions(&staged_path)?;
-
-    if let Err(error) = std::fs::rename(&staged_path, current_exe) {
-        let _ = std::fs::remove_file(&staged_path);
-        return Err(anyhow::anyhow!(
-            "Failed to replace executable at {}: {}. If installed via Homebrew/system package manager, update through that manager or rerun with write permissions.",
-            current_exe.display(),
-            error
-        ));
-    }
-    Ok(())
-}
-
-async fn run_self_update() -> Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        bail!(
-            "`zeroclaw update` is not yet supported on Windows. Use your package manager or reinstall from the latest GitHub release."
-        );
-    }
-
-    let current_exe = std::env::current_exe().context("Failed to resolve current executable")?;
-    let target = detect_release_target()?;
-    let archive_url = format!("{RELEASES_LATEST_DOWNLOAD_BASE}/zeroclaw-{target}.tar.gz");
-
-    println!("Current version: {}", env!("CARGO_PKG_VERSION"));
-    println!("Detected release target: {target}");
-    println!("Downloading latest binary from: {archive_url}");
-
-    let client = reqwest::Client::builder()
-        .user_agent(format!(
-            "zeroclaw/{}/self-update",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .build()
-        .context("Failed to initialize HTTP client for self-update")?;
-
-    let response = client
-        .get(&archive_url)
-        .send()
-        .await
-        .with_context(|| format!("Failed to download release asset from {archive_url}"))?;
-
-    if !response.status().is_success() {
-        bail!(
-            "Release asset download failed with status {} from {}",
-            response.status(),
-            archive_url
-        );
-    }
-
-    let archive_bytes = response
-        .bytes()
-        .await
-        .context("Failed to read downloaded release archive")?;
-
-    let temp_dir = std::env::temp_dir().join(format!("zeroclaw-update-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&temp_dir)
-        .with_context(|| format!("Failed to create temp directory {}", temp_dir.display()))?;
-    let _cleanup = TempDirCleanup::new(temp_dir.clone());
-
-    let archive_path = temp_dir.join(format!("zeroclaw-{target}.tar.gz"));
-    std::fs::write(&archive_path, archive_bytes)
-        .with_context(|| format!("Failed to write archive to {}", archive_path.display()))?;
-
-    extract_release_archive(&archive_path, &temp_dir)?;
-    let extracted_binary = find_extracted_binary(&temp_dir)?;
-    replace_current_executable(&extracted_binary, &current_exe)?;
-
-    println!("Updated successfully: {}", current_exe.display());
-    println!("Restart any running `zeroclaw daemon`/service to pick up the new binary.");
-    Ok(())
 }
 
 fn handle_estop_command(
@@ -2274,45 +1958,5 @@ mod tests {
             } => assert_eq!(domains, vec!["*.chase.com".to_string()]),
             other => panic!("expected estop resume command, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn update_command_parses() {
-        let cli = Cli::try_parse_from(["zeroclaw", "update"]).expect("update command should parse");
-        match cli.command {
-            Commands::Update => {}
-            other => panic!("expected update command, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn release_target_mapping_supported_pairs() {
-        assert_eq!(
-            release_target_for("linux", "x86_64"),
-            Some("x86_64-unknown-linux-gnu")
-        );
-        assert_eq!(
-            release_target_for("linux", "aarch64"),
-            Some("aarch64-unknown-linux-gnu")
-        );
-        assert_eq!(
-            release_target_for("linux", "arm"),
-            Some("armv7-unknown-linux-gnueabihf")
-        );
-        assert_eq!(
-            release_target_for("macos", "x86_64"),
-            Some("x86_64-apple-darwin")
-        );
-        assert_eq!(
-            release_target_for("macos", "aarch64"),
-            Some("aarch64-apple-darwin")
-        );
-    }
-
-    #[test]
-    fn release_target_mapping_rejects_unknown_pairs() {
-        assert_eq!(release_target_for("windows", "x86_64"), None);
-        assert_eq!(release_target_for("freebsd", "x86_64"), None);
-        assert_eq!(release_target_for("linux", "riscv64"), None);
     }
 }

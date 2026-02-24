@@ -151,7 +151,6 @@ Field names differ by channel:
 ```toml
 [channels_config.telegram]
 bot_token = "123456:telegram-token"
-base_url = "https://api.telegram.org" # optional: Telegram-compatible API endpoint (e.g. https://tapi.bale.ai for Bale)
 allowed_users = ["*"]
 stream_mode = "off"               # optional: off | partial
 draft_update_interval_ms = 1000   # optional: edit throttle for partial streaming
@@ -161,8 +160,6 @@ interrupt_on_new_message = false  # optional: cancel in-flight same-sender same-
 
 Telegram notes:
 
-- `base_url` is optional. If omitted, ZeroClaw uses `https://api.telegram.org`.
-- For Bale Messenger, set `base_url = "https://tapi.bale.ai"` (API-compatible with Telegram Bot API methods).
 - `interrupt_on_new_message = true` preserves interrupted user turns in conversation history, then restarts generation on the newest message.
 - Interruption scope is strict: same sender in the same chat. Messages from different chats are processed independently.
 

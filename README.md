@@ -1,8 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="zeroclaw-dark.png" />
-    <img src="zeroclaw-icon.png" alt="ZeroClaw" width="188" />
-  </picture>
+  <img src="zeroclaw.png" alt="ZeroClaw" width="200" />
 </p>
 
 <h1 align="center">ZeroClaw 🦀</h1>
@@ -240,8 +237,6 @@ cd zeroclaw
 
 # Optional: run bootstrap + onboarding fully in Docker-compatible mode
 ./bootstrap.sh --docker
-# Note: Docker mode uses one-shot containers (`docker run --rm ...`);
-# use the host commands printed at the end of bootstrap for later CLI usage.
 
 # Optional: force Podman as container CLI
 ZEROCLAW_CONTAINER_CLI=podman ./bootstrap.sh --docker
@@ -664,7 +659,7 @@ level = "supervised"           # "readonly", "supervised", "full" (default: supe
 workspace_only = true          # default: true — reject absolute path inputs
 allowed_commands = ["git", "npm", "cargo", "ls", "cat", "grep"]
 forbidden_paths = ["/etc", "/root", "/proc", "/sys", "~/.ssh", "~/.gnupg", "~/.aws"]
-allowed_roots = []             # empty + workspace_only=false => outside paths allowed (except forbidden_paths)
+allowed_roots = []             # optional allowlist for directories outside workspace (supports "~/...")
 # Example outside-workspace access:
 # workspace_only = false
 # allowed_roots = ["~/Desktop/projects", "/opt/shared-repo"]
@@ -731,20 +726,6 @@ enabled = false                # opt-in: 1000+ OAuth apps via composio.dev
 entity_id = "default"          # default user_id for Composio tool calls
 # Runtime tip: if execute asks for connected_account_id, run composio with
 # action='list_accounts' and app='gmail' (or your toolkit) to retrieve account IDs.
-
-[mcp]
-enabled = false                # opt-in external MCP server definitions
-
-[mcp.servers.camoufox]
-command = "npx"                # stdio transport
-args = ["-y", "camoufox-mcp-server"]
-timeout_secs = 30
-
-# Remote MCP server example
-#[mcp.servers.remote_docs]
-#url = "https://mcp.example.com"
-#headers = { Authorization = "Bearer ${MCP_TOKEN}" }
-#timeout_secs = 30
 
 [identity]
 format = "openclaw"            # "openclaw" (default, markdown files) or "aieos" (JSON)
@@ -969,7 +950,6 @@ See [aieos.org](https://aieos.org) for the full schema and live examples.
 | Command | Description |
 |---------|-------------|
 | `onboard` | Quick setup (default) |
-| `update` | Self-update from the latest GitHub pre-built release binary |
 | `agent` | Interactive or single-message chat mode |
 | `gateway` | Start webhook server (default: `127.0.0.1:42617`) |
 | `daemon` | Start long-running autonomous runtime |

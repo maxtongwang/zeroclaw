@@ -7,7 +7,6 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
@@ -18,7 +17,6 @@ pub struct OpenAiCodexProvider {
     auth: AuthService,
     auth_profile_override: Option<String>,
     client: Client,
-    reasoning_level: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -99,7 +97,6 @@ impl OpenAiCodexProvider {
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .build()
                 .unwrap_or_else(|_| Client::new()),
-            reasoning_level: normalize_reasoning_level_config(&options.reasoning_level),
         }
     }
 }
@@ -227,52 +224,12 @@ fn clamp_reasoning_effort(model: &str, effort: &str) -> String {
     effort.to_string()
 }
 
-fn normalize_reasoning_level_config(levels: &HashMap<String, String>) -> HashMap<String, String> {
-    levels
-        .iter()
-        .filter_map(|(key, value)| {
-            let normalized_key = key.trim().to_ascii_lowercase();
-            if normalized_key.is_empty() {
-                return None;
-            }
-
-            let normalized_value = normalize_reasoning_effort_value(value)?;
-            Some((normalized_key, normalized_value.to_string()))
-        })
-        .collect()
-}
-
-fn normalize_reasoning_effort_value(value: &str) -> Option<&'static str> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "minimal" => Some("minimal"),
-        "low" => Some("low"),
-        "medium" => Some("medium"),
-        "high" => Some("high"),
-        "xhigh" => Some("xhigh"),
-        _ => None,
-    }
-}
-
-fn resolve_reasoning_effort(model_id: &str, configured_levels: &HashMap<String, String>) -> String {
-    let model = normalize_model_id(model_id).to_ascii_lowercase();
-    let provider_model_key = format!("openai-codex/{model}");
-    let codex_alias_key = format!("codex/{model}");
-
-    let from_config = configured_levels
-        .get(&provider_model_key)
-        .or_else(|| configured_levels.get(&codex_alias_key))
-        .or_else(|| configured_levels.get(&model))
-        .or_else(|| configured_levels.get("default"))
-        .cloned();
-
-    let from_env = std::env::var("ZEROCLAW_CODEX_REASONING_EFFORT")
+fn resolve_reasoning_effort(model_id: &str) -> String {
+    let raw = std::env::var("ZEROCLAW_CODEX_REASONING_EFFORT")
         .ok()
         .and_then(|value| first_nonempty(Some(&value)))
-        .and_then(|value| normalize_reasoning_effort_value(&value).map(str::to_string));
-
-    let raw = from_config
-        .or(from_env)
-        .unwrap_or_else(|| "xhigh".to_string());
+        .unwrap_or_else(|| "xhigh".to_string())
+        .to_ascii_lowercase();
     clamp_reasoning_effort(model_id, &raw)
 }
 
@@ -501,7 +458,7 @@ impl OpenAiCodexProvider {
                 verbosity: "medium".to_string(),
             },
             reasoning: ResponsesReasoningOptions {
-                effort: resolve_reasoning_effort(normalized_model, &self.reasoning_level),
+                effort: resolve_reasoning_effort(normalized_model),
                 summary: "auto".to_string(),
             },
             include: vec!["reasoning.encrypted_content".to_string()],
@@ -672,52 +629,6 @@ mod tests {
         assert_eq!(
             clamp_reasoning_effort("gpt-5.3-codex", "xhigh"),
             "xhigh".to_string()
-        );
-    }
-
-    #[test]
-    fn normalize_reasoning_level_config_normalizes_and_drops_invalid_values() {
-        let raw = HashMap::from([
-            (" default ".to_string(), " HIGH ".to_string()),
-            ("OpenAI-Codex/GPT-5-Codex".to_string(), "Medium".to_string()),
-            ("gpt-5.2-codex".to_string(), "xhigh".to_string()),
-            ("gpt-5.3-codex".to_string(), "invalid".to_string()),
-        ]);
-        let normalized = normalize_reasoning_level_config(&raw);
-        assert_eq!(normalized.get("default"), Some(&"high".to_string()));
-        assert_eq!(
-            normalized.get("openai-codex/gpt-5-codex"),
-            Some(&"medium".to_string())
-        );
-        assert_eq!(normalized.get("gpt-5.2-codex"), Some(&"xhigh".to_string()));
-        assert!(!normalized.contains_key("gpt-5.3-codex"));
-    }
-
-    #[test]
-    fn resolve_reasoning_effort_prefers_provider_model_key_then_model_then_default() {
-        let levels = HashMap::from([
-            ("default".to_string(), "low".to_string()),
-            ("gpt-5-codex".to_string(), "medium".to_string()),
-            ("openai-codex/gpt-5-codex".to_string(), "high".to_string()),
-        ]);
-        assert_eq!(
-            resolve_reasoning_effort("gpt-5-codex", &levels),
-            "high".to_string()
-        );
-
-        let levels = HashMap::from([
-            ("default".to_string(), "low".to_string()),
-            ("gpt-5-codex".to_string(), "medium".to_string()),
-        ]);
-        assert_eq!(
-            resolve_reasoning_effort("gpt-5-codex", &levels),
-            "medium".to_string()
-        );
-
-        let levels = HashMap::from([("default".to_string(), "low".to_string())]);
-        assert_eq!(
-            resolve_reasoning_effort("gpt-5-codex", &levels),
-            "low".to_string()
         );
     }
 

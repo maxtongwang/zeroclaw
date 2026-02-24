@@ -82,7 +82,6 @@ function PairingDialog({ onPair }: { onPair: (code: string) => Promise<void> }) 
 function AppContent() {
   const { isAuthenticated, loading, pair, logout } = useAuth();
   const [locale, setLocaleState] = useState('tr');
-  const [pairingRequired, setPairingRequired] = useState<boolean | null>(null);
 
   const setAppLocale = (newLocale: string) => {
     setLocaleState(newLocale);
@@ -98,48 +97,15 @@ function AppContent() {
     return () => window.removeEventListener('zeroclaw-unauthorized', handler);
   }, [logout]);
 
-  // Pairing is backend-configurable, so the UI probes /health on mount instead
-  // of assuming local token absence always implies pairing is required.
-  useEffect(() => {
-    let cancelled = false;
-
-    const loadPairingRequirement = async () => {
-      try {
-        const response = await fetch('/health', {
-          headers: { Accept: 'application/json' },
-          cache: 'no-store',
-        });
-        if (!response.ok) {
-          throw new Error(`health check failed: ${response.status}`);
-        }
-
-        const payload = (await response.json()) as { require_pairing?: unknown };
-        const required =
-          typeof payload.require_pairing === 'boolean'
-            ? payload.require_pairing
-            : true;
-        if (!cancelled) {
-          setPairingRequired(required);
-        }
-      } catch {
-        // Fail closed: if we cannot determine pairing mode, keep pairing gate on.
-        if (!cancelled) {
-          setPairingRequired(true);
-        }
-      }
-    };
-
-    void loadPairingRequirement();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  if (pairingRequired === null) {
-    return <div className="min-h-screen bg-gray-950" />;
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-950 flex items-center justify-center">
+        <p className="text-gray-400">Connecting...</p>
+      </div>
+    );
   }
 
-  if (pairingRequired && !isAuthenticated) {
+  if (!isAuthenticated) {
     return <PairingDialog onPair={pair} />;
   }
 

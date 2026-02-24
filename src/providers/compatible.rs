@@ -57,7 +57,7 @@ impl OpenAiCompatibleProvider {
         auth_style: AuthStyle,
     ) -> Self {
         Self::new_with_options(
-            name, base_url, credential, auth_style, false, true, None, false,
+            name, base_url, credential, auth_style, false, true, None, false, true,
         )
     }
 
@@ -77,6 +77,7 @@ impl OpenAiCompatibleProvider {
             true,
             None,
             false,
+            true,
         )
     }
 
@@ -89,7 +90,7 @@ impl OpenAiCompatibleProvider {
         auth_style: AuthStyle,
     ) -> Self {
         Self::new_with_options(
-            name, base_url, credential, auth_style, false, false, None, false,
+            name, base_url, credential, auth_style, false, false, None, false, true,
         )
     }
 
@@ -113,6 +114,7 @@ impl OpenAiCompatibleProvider {
             true,
             Some(user_agent),
             false,
+            true,
         )
     }
 
@@ -133,6 +135,7 @@ impl OpenAiCompatibleProvider {
             true,
             Some(user_agent),
             false,
+            true,
         )
     }
 
@@ -145,7 +148,7 @@ impl OpenAiCompatibleProvider {
         auth_style: AuthStyle,
     ) -> Self {
         Self::new_with_options(
-            name, base_url, credential, auth_style, false, false, None, true,
+            name, base_url, credential, auth_style, false, false, None, true, false,
         )
     }
 
@@ -158,6 +161,7 @@ impl OpenAiCompatibleProvider {
         supports_responses_fallback: bool,
         user_agent: Option<&str>,
         merge_system_into_user: bool,
+        native_tool_calling: bool,
     ) -> Self {
         Self {
             name: name.to_string(),
@@ -168,6 +172,7 @@ impl OpenAiCompatibleProvider {
             supports_responses_fallback,
             user_agent: user_agent.map(ToString::to_string),
             merge_system_into_user,
+            native_tool_calling,
         }
     }
 
@@ -1554,7 +1559,7 @@ impl Provider for OpenAiCompatibleProvider {
     }
 
     fn supports_native_tools(&self) -> bool {
-        true
+        self.native_tool_calling
     }
 
     fn supports_streaming(&self) -> bool {
@@ -1823,7 +1828,7 @@ mod tests {
             make_provider("Moonshot", "https://api.moonshot.cn", None),
             make_provider("GLM", "https://open.bigmodel.cn", None),
             make_provider("MiniMax", "https://api.minimaxi.com/v1", None),
-            make_provider("Groq", "https://api.groq.com/openai/v1", None),
+            make_provider("Groq", "https://api.groq.com/openai", None),
             make_provider("Mistral", "https://api.mistral.ai", None),
             make_provider("xAI", "https://api.x.ai", None),
             make_provider("Astrai", "https://as-trai.com/v1", None),
@@ -1963,16 +1968,6 @@ mod tests {
         assert_eq!(
             p.chat_completions_url(),
             "https://api.openai.com/v1/chat/completions"
-        );
-    }
-
-    #[test]
-    fn chat_completions_url_groq_openai_v1() {
-        // Groq's OpenAI-compatible API requires the /openai/v1 prefix.
-        let p = make_provider("groq", "https://api.groq.com/openai/v1", None);
-        assert_eq!(
-            p.chat_completions_url(),
-            "https://api.groq.com/openai/v1/chat/completions"
         );
     }
 

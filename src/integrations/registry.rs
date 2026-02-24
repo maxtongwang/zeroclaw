@@ -799,7 +799,6 @@ mod tests {
         let mut config = Config::default();
         config.channels_config.telegram = Some(TelegramConfig {
             bot_token: "123:ABC".into(),
-            base_url: None,
             allowed_users: vec!["user".into()],
             stream_mode: StreamMode::default(),
             draft_update_interval_ms: 1000,

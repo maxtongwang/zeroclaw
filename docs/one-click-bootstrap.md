@@ -95,10 +95,6 @@ If you run Option B outside a repository checkout, the bootstrap script automati
 This builds a local ZeroClaw image and launches onboarding inside a container while
 persisting config/workspace to `./.zeroclaw-docker`.
 
-`--docker` uses one-shot containers (`docker run --rm` / `podman run --rm`).
-After onboarding exits, no long-running ZeroClaw container remains, so
-`docker ps` may show nothing running. This is expected.
-
 Container CLI defaults to `docker`. If Docker CLI is unavailable and `podman` exists,
 bootstrap auto-falls back to `podman`. You can also set `ZEROCLAW_CONTAINER_CLI`
 explicitly (for example: `ZEROCLAW_CONTAINER_CLI=podman ./bootstrap.sh --docker`).
@@ -109,34 +105,6 @@ workspace/config mounts remain writable inside the container.
 If you add `--skip-build`, bootstrap skips local image build. It first tries the local
 Docker tag (`ZEROCLAW_DOCKER_IMAGE`, default: `zeroclaw-bootstrap:local`); if missing,
 it pulls `ghcr.io/zeroclaw-labs/zeroclaw:latest` and tags it locally before running.
-
-#### Run ZeroClaw CLI commands after Docker bootstrap
-
-Bootstrap prints exact host commands at the end. Use that printed prefix to run any
-`zeroclaw` subcommand from your host shell.
-
-Example (default Docker CLI + default local data dir):
-
-```bash
-docker run --rm -it \
-  --user "$(id -u):$(id -g)" \
-  -e HOME=/zeroclaw-data \
-  -e ZEROCLAW_WORKSPACE=/zeroclaw-data/workspace \
-  -v "$(pwd)/.zeroclaw-docker/.zeroclaw:/zeroclaw-data/.zeroclaw" \
-  -v "$(pwd)/.zeroclaw-docker/workspace:/zeroclaw-data/workspace" \
-  zeroclaw-bootstrap:local status
-```
-
-Other examples:
-
-```bash
-docker run --rm -it ... zeroclaw-bootstrap:local auth login --provider openai-codex --device-code
-docker run --rm -it ... zeroclaw-bootstrap:local channel start
-docker run --rm -it ... zeroclaw-bootstrap:local agent -m "Hello, ZeroClaw!"
-```
-
-If you used the remote one-liner outside a local repo checkout, the default data dir is
-`~/.zeroclaw-docker` instead of `./.zeroclaw-docker`.
 
 ### Quick onboarding (non-interactive)
 

@@ -292,16 +292,6 @@ fn parse_attachment_markers(message: &str) -> (String, Vec<TelegramAttachment>) 
 
 /// Telegram Bot API maximum file download size (20 MB).
 const TELEGRAM_MAX_FILE_DOWNLOAD_BYTES: u64 = 20 * 1024 * 1024;
-const TELEGRAM_API_BASE_DEFAULT: &str = "https://api.telegram.org";
-
-fn normalize_api_base(api_base: &str) -> String {
-    let trimmed = api_base.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
-        TELEGRAM_API_BASE_DEFAULT.to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
 
 /// Telegram channel — long-polls the Bot API for updates
 pub struct TelegramChannel {
@@ -348,7 +338,7 @@ impl TelegramChannel {
             typing_handle: Mutex::new(None),
             mention_only,
             bot_username: Mutex::new(None),
-            api_base: TELEGRAM_API_BASE_DEFAULT.to_string(),
+            api_base: "https://api.telegram.org".to_string(),
             transcription: None,
             voice_transcriptions: Mutex::new(std::collections::HashMap::new()),
             workspace_dir: None,
@@ -373,10 +363,9 @@ impl TelegramChannel {
     }
 
     /// Override the Telegram Bot API base URL.
-    /// Useful for Telegram-compatible endpoints (for example Bale),
-    /// local Bot API servers, or testing.
+    /// Useful for local Bot API servers or testing.
     pub fn with_api_base(mut self, api_base: String) -> Self {
-        self.api_base = normalize_api_base(&api_base);
+        self.api_base = api_base;
         self
     }
 
@@ -527,13 +516,7 @@ impl TelegramChannel {
     }
 
     fn api_url(&self, method: &str) -> String {
-        let method = method.trim_start_matches('/');
         format!("{}/bot{}/{method}", self.api_base, self.bot_token)
-    }
-
-    fn file_url(&self, file_path: &str) -> String {
-        let file_path = file_path.trim_start_matches('/');
-        format!("{}/file/bot{}/{}", self.api_base, self.bot_token, file_path)
     }
 
     async fn fetch_bot_username(&self) -> anyhow::Result<String> {
@@ -844,7 +827,10 @@ Allowlist Telegram username (without '@') or numeric user ID.",
 
     /// Download a file from the Telegram CDN.
     async fn download_file(&self, file_path: &str) -> anyhow::Result<Vec<u8>> {
-        let url = self.file_url(file_path);
+        let url = format!(
+            "https://api.telegram.org/file/bot{}/{file_path}",
+            self.bot_token
+        );
         let resp = self
             .http_client()
             .get(&url)
@@ -1338,7 +1324,10 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             .to_string();
 
         // Step 2: download the actual file
-        let download_url = self.file_url(&file_path);
+        let download_url = format!(
+            "https://api.telegram.org/file/bot{}/{}",
+            self.bot_token, file_path
+        );
         let img_resp = self.http_client().get(&download_url).send().await?;
         let bytes = img_resp.bytes().await?;
 
@@ -2845,63 +2834,6 @@ mod tests {
         assert_eq!(
             ch.api_url("getMe"),
             "https://api.telegram.org/bot123:ABC/getMe"
-        );
-    }
-
-    #[test]
-    fn telegram_api_url_custom_base_supports_bale() {
-        let ch = TelegramChannel::new("123:ABC".into(), vec![], false)
-            .with_api_base("https://tapi.bale.ai".to_string());
-        assert_eq!(ch.api_url("getMe"), "https://tapi.bale.ai/bot123:ABC/getMe");
-    }
-
-    #[test]
-    fn telegram_api_url_normalizes_trailing_slash() {
-        let ch = TelegramChannel::new("123:ABC".into(), vec![], false)
-            .with_api_base("https://tapi.bale.ai/".to_string());
-        assert_eq!(
-            ch.api_url("sendMessage"),
-            "https://tapi.bale.ai/bot123:ABC/sendMessage"
-        );
-    }
-
-    #[test]
-    fn telegram_api_url_empty_custom_base_falls_back_to_default() {
-        let ch =
-            TelegramChannel::new("123:ABC".into(), vec![], false).with_api_base("   ".to_string());
-        assert_eq!(
-            ch.api_url("getMe"),
-            "https://api.telegram.org/bot123:ABC/getMe"
-        );
-    }
-
-    #[test]
-    fn telegram_api_url_strips_leading_slash_in_method() {
-        let ch = TelegramChannel::new("123:ABC".into(), vec![], false)
-            .with_api_base("https://tapi.bale.ai".to_string());
-        assert_eq!(
-            ch.api_url("/sendMessage"),
-            "https://tapi.bale.ai/bot123:ABC/sendMessage"
-        );
-    }
-
-    #[test]
-    fn telegram_file_url_uses_custom_base() {
-        let ch = TelegramChannel::new("123:ABC".into(), vec![], false)
-            .with_api_base("https://tapi.bale.ai".to_string());
-        assert_eq!(
-            ch.file_url("photos/file.png"),
-            "https://tapi.bale.ai/file/bot123:ABC/photos/file.png"
-        );
-    }
-
-    #[test]
-    fn telegram_file_url_strips_leading_slash_in_file_path() {
-        let ch = TelegramChannel::new("123:ABC".into(), vec![], false)
-            .with_api_base("https://tapi.bale.ai".to_string());
-        assert_eq!(
-            ch.file_url("/photos/file.png"),
-            "https://tapi.bale.ai/file/bot123:ABC/photos/file.png"
         );
     }
 

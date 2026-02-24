@@ -36,14 +36,6 @@ fn create_cli_memory(config: &Config) -> Result<Box<dyn Memory>> {
         &config.memory.backend,
         Some(&config.storage.provider.config),
     );
-    if backend.strip_prefix("plugin:").is_some() {
-        return super::create_memory_with_storage(
-            &config.memory,
-            Some(&config.storage.provider.config),
-            &config.workspace_dir,
-            config.api_key.as_deref(),
-        );
-    }
 
     match classify_memory_backend(&backend) {
         MemoryBackendKind::None => {

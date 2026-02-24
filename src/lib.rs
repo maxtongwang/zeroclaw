@@ -39,7 +39,6 @@ use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
 pub mod agent;
-pub(crate) mod bootstrap;
 pub(crate) mod approval;
 pub(crate) mod auth;
 pub mod channels;
@@ -61,14 +60,12 @@ pub(crate) mod multimodal;
 pub mod observability;
 pub(crate) mod onboard;
 pub mod peripherals;
-pub mod plugins;
 pub mod providers;
 pub mod rag;
 pub mod runtime;
 pub(crate) mod security;
 pub(crate) mod service;
 pub(crate) mod skills;
-pub mod sop;
 pub mod tools;
 pub(crate) mod tunnel;
 pub(crate) mod util;
@@ -139,30 +136,6 @@ Examples:
         /// Telegram identity to allow (username without '@' or numeric user ID)
         identity: String,
     },
-    /// Manage Signal PIN verification gate
-    Signal {
-        #[command(subcommand)]
-        signal_command: SignalChannelCommands,
-    },
-}
-
-/// Signal channel subcommands
-#[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum SignalChannelCommands {
-    /// Set or change the Signal PIN gate secret
-    SetPin,
-    /// Show Signal PIN verification status
-    PinStatus,
-    /// Manually verify Signal PIN to unlock channel access
-    VerifyPin,
-    /// Reset Signal PIN (requires current PIN when already configured)
-    ResetPin,
-    /// Disable Signal PIN verification gate in config
-    DisablePin {
-        /// Skip confirmation prompt
-        #[arg(long)]
-        yes: bool,
-    },
 }
 
 /// Skills management subcommands
@@ -183,23 +156,6 @@ pub enum SkillCommands {
     /// Remove an installed skill
     Remove {
         /// Skill name to remove
-        name: String,
-    },
-}
-
-/// SOP management subcommands
-#[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum SopCommands {
-    /// List all configured SOPs
-    List,
-    /// Validate SOP definitions (all, or a specific one by name)
-    Validate {
-        /// SOP name to validate (validates all if omitted)
-        name: Option<String>,
-    },
-    /// Show detailed info about a specific SOP
-    Show {
-        /// SOP name
         name: String,
     },
 }
@@ -376,20 +332,6 @@ pub enum MemoryCommands {
 /// Integration subcommands
 #[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IntegrationCommands {
-    /// List integrations, optionally filtered by category/status
-    List {
-        /// Filter by category (for example: chat, ai, tools)
-        #[arg(long)]
-        category: Option<String>,
-        /// Filter by status (active, available, coming-soon)
-        #[arg(long)]
-        status: Option<String>,
-    },
-    /// Search integrations by name or description
-    Search {
-        /// Case-insensitive keyword search
-        query: String,
-    },
     /// Show details about a specific integration
     Info {
         /// Integration name

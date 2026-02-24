@@ -545,61 +545,6 @@ fn is_allowlist_entry_match(allowed: &str, executable: &str, executable_base: &s
     allowed == executable_base
 }
 
-fn is_dangerous_git_config_key(raw: &str) -> bool {
-    let key = raw
-        .split('=')
-        .next()
-        .unwrap_or(raw)
-        .trim_matches('"')
-        .trim_matches('\'')
-        .trim()
-        .to_ascii_lowercase();
-
-    key == "core.editor"
-        || key == "core.pager"
-        || key == "credential"
-        || key.starts_with("credential.")
-        || key == "alias"
-        || key.starts_with("alias.")
-}
-
-fn is_safe_git_config_invocation(args_after_config: &[String]) -> bool {
-    // Block obviously mutating config operations.
-    let has_mutating_flag = args_after_config.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "--add"
-                | "--replace-all"
-                | "--unset"
-                | "--unset-all"
-                | "--rename-section"
-                | "--remove-section"
-                | "--edit"
-                | "-e"
-        )
-    });
-    if has_mutating_flag {
-        return false;
-    }
-
-    // Block dangerous key families for both reads and writes.
-    if args_after_config
-        .iter()
-        .filter(|arg| !arg.starts_with('-'))
-        .any(|arg| is_dangerous_git_config_key(arg))
-    {
-        return false;
-    }
-
-    // Allow only read-only queries for now.
-    args_after_config.iter().any(|arg| {
-        matches!(
-            arg.as_str(),
-            "--get" | "--get-all" | "--get-regexp" | "--get-urlmatch" | "--list" | "-l"
-        )
-    })
-}
-
 impl SecurityPolicy {
     // ── Risk Classification ──────────────────────────────────────────────
     // Risk is assessed per-segment (split on shell operators), and the
@@ -782,6 +727,8 @@ impl SecurityPolicy {
         // commands inside an allowed command (e.g. `echo $(rm -rf /)`) and
         // bypassing path checks through variable indirection.
         if command.contains('`')
+            || command.contains("$(")
+            || command.contains("${")
             || contains_unquoted_shell_variable_expansion(command)
             || command.contains("<(")
             || command.contains(">(")
@@ -858,23 +805,15 @@ impl SecurityPolicy {
                 !args.iter().any(|arg| arg == "-exec" || arg == "-ok")
             }
             "git" => {
-                // git alias and -c can be used to inject command execution.
-                if args
-                    .iter()
-                    .any(|arg| arg == "alias" || arg.starts_with("alias."))
-                {
-                    return false;
-                }
-                if args.iter().any(|arg| arg == "-c" || arg.starts_with("-c")) {
-                    return false;
-                }
-
-                // Allow only read-only `git config` queries, and block dangerous keys.
-                if let Some(config_idx) = args.iter().position(|arg| arg == "config") {
-                    return is_safe_git_config_invocation(&args[config_idx + 1..]);
-                }
-
-                true
+                // git config, alias, and -c can be used to set dangerous options
+                // (e.g. git config core.editor "rm -rf /")
+                !args.iter().any(|arg| {
+                    arg == "config"
+                        || arg.starts_with("config.")
+                        || arg == "alias"
+                        || arg.starts_with("alias.")
+                        || arg == "-c"
+                })
             }
             _ => true,
         }
@@ -1021,13 +960,6 @@ impl SecurityPolicy {
             }
         }
 
-        // When workspace confinement is explicitly disabled and no scoped
-        // allow_roots are configured, treat resolved-path access as permissive.
-        // We still enforce explicit forbidden_paths against the resolved path.
-        if !self.workspace_only && self.allowed_roots.is_empty() {
-            return !self.is_resolved_path_forbidden(resolved, &workspace_root);
-        }
-
         false
     }
 
@@ -1043,23 +975,6 @@ impl SecurityPolicy {
             resolved.display(),
             guidance
         )
-    }
-
-    fn is_resolved_path_forbidden(&self, resolved: &Path, workspace_root: &Path) -> bool {
-        for forbidden in &self.forbidden_paths {
-            let forbidden_path = expand_user_path(forbidden);
-            let forbidden_abs = if forbidden_path.is_absolute() {
-                forbidden_path
-            } else {
-                workspace_root.join(forbidden_path)
-            };
-            let forbidden_canonical = forbidden_abs.canonicalize().unwrap_or(forbidden_abs);
-            if resolved.starts_with(&forbidden_canonical) {
-                return true;
-            }
-        }
-
-        false
     }
 
     /// Check if autonomy level permits any action at all
@@ -1116,7 +1031,7 @@ impl SecurityPolicy {
         autonomy_config: &crate::config::AutonomyConfig,
         workspace_dir: &Path,
     ) -> Self {
-        let base = Self {
+        Self {
             autonomy: autonomy_config.level,
             workspace_dir: workspace_dir.to_path_buf(),
             workspace_only: autonomy_config.workspace_only,
@@ -1140,9 +1055,7 @@ impl SecurityPolicy {
             block_high_risk_commands: autonomy_config.block_high_risk_commands,
             shell_env_passthrough: autonomy_config.shell_env_passthrough.clone(),
             tracker: ActionTracker::new(),
-        };
-
-        super::plugin::apply_security_plugins(base, workspace_dir)
+        }
     }
 }
 
@@ -1300,24 +1213,6 @@ mod tests {
         let blocked = p.validate_command_execution("rm -rf /tmp/test", true);
         assert!(blocked.is_err());
         assert!(blocked.unwrap_err().contains("high-risk"));
-    }
-
-    #[test]
-    fn wildcard_still_enforces_argument_and_injection_guards() {
-        let p = SecurityPolicy {
-            allowed_commands: vec!["*".into()],
-            ..SecurityPolicy::default()
-        };
-
-        // Wildcard skips command-name allowlisting but must still enforce
-        // defense-in-depth argument/injection guards.
-        assert!(!p.is_command_allowed("find . -exec rm -rf {} +"));
-        assert!(!p.is_command_allowed("git config alias.st status"));
-        assert!(!p.is_command_allowed("echo $(cat /etc/passwd)"));
-        assert!(!p.is_command_allowed("echo ok | tee /tmp/out.txt"));
-
-        assert!(p.is_command_allowed("find . -name '*.rs'"));
-        assert!(p.is_command_allowed("git status"));
     }
 
     #[test]
@@ -1704,13 +1599,6 @@ mod tests {
     }
 
     #[test]
-    fn single_quoted_dollar_expansion_literals_are_allowed() {
-        let p = default_policy();
-        assert!(p.is_command_allowed("echo '$(hello)'"));
-        assert!(p.is_command_allowed("echo '${HOME}'"));
-    }
-
-    #[test]
     fn command_with_env_var_prefix() {
         let p = default_policy();
         // "FOO=bar" is the first word — not in allowlist
@@ -1774,7 +1662,7 @@ mod tests {
         // find -exec is a common bypass
         assert!(!p.is_command_allowed("find . -exec rm -rf {} +"));
         assert!(!p.is_command_allowed("find / -ok cat {} \\;"));
-        // git config dangerous keys / alias / -c can execute commands
+        // git config/alias can execute commands
         assert!(!p.is_command_allowed("git config core.editor \"rm -rf /\""));
         assert!(!p.is_command_allowed("git alias.st status"));
         assert!(!p.is_command_allowed("git -c core.editor=calc.exe commit"));
@@ -1782,20 +1670,6 @@ mod tests {
         assert!(p.is_command_allowed("find . -name '*.txt'"));
         assert!(p.is_command_allowed("git status"));
         assert!(p.is_command_allowed("git add ."));
-    }
-
-    #[test]
-    fn git_config_readonly_queries_allowed_but_dangerous_keys_blocked() {
-        let p = default_policy();
-
-        assert!(p.is_command_allowed("git config --get user.name"));
-        assert!(p.is_command_allowed("git config --list"));
-        assert!(p.is_command_allowed("git config -l"));
-
-        assert!(!p.is_command_allowed("git config --get core.editor"));
-        assert!(!p.is_command_allowed("git config --get credential.helper"));
-        assert!(!p.is_command_allowed("git config user.name \"Zero Claw\""));
-        assert!(!p.is_command_allowed("git config --add safe.directory /tmp"));
     }
 
     #[test]
@@ -2164,56 +2038,6 @@ mod tests {
         assert!(!p.is_resolved_path_allowed(Path::new("/home/user/other_project/file")));
         // Root — blocked
         assert!(!p.is_resolved_path_allowed(Path::new("/")));
-    }
-
-    #[test]
-    fn resolved_path_allows_outside_workspace_when_workspace_only_disabled_without_roots() {
-        let p = SecurityPolicy {
-            workspace_dir: PathBuf::from("/home/user/project"),
-            workspace_only: false,
-            forbidden_paths: vec![],
-            allowed_roots: vec![],
-            ..SecurityPolicy::default()
-        };
-
-        assert!(p.is_resolved_path_allowed(Path::new("/home/user/other_project/file")));
-        assert!(p.is_resolved_path_allowed(Path::new("/opt/shared/data.txt")));
-    }
-
-    #[test]
-    fn resolved_path_blocks_forbidden_entries_in_permissive_mode() {
-        let p = SecurityPolicy {
-            workspace_dir: PathBuf::from("/home/user/project"),
-            workspace_only: false,
-            forbidden_paths: vec!["/etc".into(), "/var".into()],
-            allowed_roots: vec![],
-            ..SecurityPolicy::default()
-        };
-
-        let etc_path = Path::new("/etc/passwd")
-            .canonicalize()
-            .unwrap_or_else(|_| PathBuf::from("/etc/passwd"));
-        let var_path = Path::new("/var")
-            .canonicalize()
-            .unwrap_or_else(|_| PathBuf::from("/var"));
-
-        assert!(!p.is_resolved_path_allowed(&etc_path));
-        assert!(!p.is_resolved_path_allowed(&var_path));
-        assert!(p.is_resolved_path_allowed(Path::new("/opt/shared/data.txt")));
-    }
-
-    #[test]
-    fn resolved_path_respects_allowed_roots_when_workspace_only_disabled_with_scoped_roots() {
-        let p = SecurityPolicy {
-            workspace_dir: PathBuf::from("/home/user/project"),
-            workspace_only: false,
-            forbidden_paths: vec![],
-            allowed_roots: vec![PathBuf::from("/opt/shared")],
-            ..SecurityPolicy::default()
-        };
-
-        assert!(p.is_resolved_path_allowed(Path::new("/opt/shared/data.txt")));
-        assert!(!p.is_resolved_path_allowed(Path::new("/opt/other/data.txt")));
     }
 
     #[test]

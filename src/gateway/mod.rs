@@ -12,13 +12,15 @@ pub mod sse;
 pub mod static_files;
 pub mod ws;
 
-use crate::bootstrap;
 use crate::channels::{Channel, LinqChannel, NextcloudTalkChannel, SendMessage, WatiChannel, WhatsAppChannel};
 use crate::config::Config;
+use serde::Deserialize;
 use crate::cost::CostTracker;
-use crate::memory::{Memory, MemoryCategory};
+use crate::memory::{self, Memory, MemoryCategory};
 use crate::providers::{self, ChatMessage, Provider};
+use crate::runtime;
 use crate::security::pairing::{constant_time_eq, is_public_bind, PairingGuard};
+use crate::security::SecurityPolicy;
 use crate::tools;
 use crate::tools::traits::ToolSpec;
 use crate::util::truncate_with_ellipsis;
@@ -38,7 +40,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
-use tracing::Instrument;
 use uuid::Uuid;
 
 /// Maximum request body size (64KB) — prevents memory exhaustion
@@ -308,24 +309,11 @@ pub struct AppState {
     pub cost_tracker: Option<Arc<CostTracker>>,
     /// SSE broadcast channel for real-time events
     pub event_tx: tokio::sync::broadcast::Sender<serde_json::Value>,
-    /// Shared SOP engine (if SOP is enabled)
-    pub sop_engine: Option<Arc<std::sync::Mutex<crate::sop::SopEngine>>>,
-    /// SOP audit logger (if SOP is enabled)
-    pub sop_audit: Option<Arc<crate::sop::SopAuditLogger>>,
-    /// SOP metrics collector (if SOP is enabled)
-    pub sop_collector: Option<Arc<crate::sop::SopMetricsCollector>>,
 }
 
 /// Run the HTTP gateway using axum with proper HTTP/1.1 compliance.
 #[allow(clippy::too_many_lines)]
-pub async fn run_gateway(
-    host: &str,
-    port: u16,
-    config: Config,
-    sop_engine: Option<Arc<std::sync::Mutex<crate::sop::SopEngine>>>,
-    sop_audit: Option<Arc<crate::sop::SopAuditLogger>>,
-    sop_collector: Option<Arc<crate::sop::SopMetricsCollector>>,
-) -> Result<()> {
+pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     // ── Security: refuse public bind without tunnel or explicit opt-in ──
     if is_public_bind(host) && config.tunnel.provider == "none" && !config.gateway.allow_public_bind
     {
@@ -349,27 +337,44 @@ pub async fn run_gateway(
     let actual_port = listener.local_addr()?.port();
     let display_addr = format!("{host}:{actual_port}");
 
-    let provider_runtime_options = bootstrap::provider_runtime_options(&config);
     let provider: Arc<dyn Provider> = Arc::from(providers::create_resilient_provider_with_options(
         config.default_provider.as_deref().unwrap_or("openrouter"),
         config.api_key.as_deref(),
         config.api_url.as_deref(),
         &config.reliability,
-        &provider_runtime_options,
+        &providers::ProviderRuntimeOptions {
+            auth_profile_override: None,
+            zeroclaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
+            secrets_encrypt: config.secrets.encrypt,
+            reasoning_enabled: config.runtime.reasoning_enabled,
+        },
     )?);
     let model = config
         .default_model
         .clone()
         .unwrap_or_else(|| "anthropic/claude-sonnet-4".into());
     let temperature = config.default_temperature;
-    let bootstrap::CoreServices {
-        runtime,
-        security,
-        memory: mem,
-        ..
-    } = bootstrap::build_core_services(&config)?;
+    let mem: Arc<dyn Memory> = Arc::from(memory::create_memory_with_storage(
+        &config.memory,
+        Some(&config.storage.provider.config),
+        &config.workspace_dir,
+        config.api_key.as_deref(),
+    )?);
+    let runtime: Arc<dyn runtime::RuntimeAdapter> =
+        Arc::from(runtime::create_runtime(&config.runtime)?);
+    let security = Arc::new(SecurityPolicy::from_config(
+        &config.autonomy,
+        &config.workspace_dir,
+    ));
 
-    let (composio_key, composio_entity_id) = bootstrap::composio_credentials(&config);
+    let (composio_key, composio_entity_id) = if config.composio.enabled {
+        (
+            config.composio.api_key.as_deref(),
+            Some(config.composio.entity_id.as_str()),
+        )
+    } else {
+        (None, None)
+    };
 
     let tools_registry_raw = tools::all_tools_with_runtime(
         Arc::new(config.clone()),
@@ -385,12 +390,6 @@ pub async fn run_gateway(
         &config.agents,
         config.api_key.as_deref(),
         &config,
-        sop_engine.clone(),
-        sop_collector.clone(),
-        #[cfg(feature = "ampersona-gates")]
-        None, // gateway — no gate evaluation state wiring
-        #[cfg(not(feature = "ampersona-gates"))]
-        None,
     );
     let tools_registry: Arc<Vec<ToolSpec>> =
         Arc::new(tools_registry_raw.iter().map(|t| t.spec()).collect());
@@ -575,7 +574,6 @@ pub async fn run_gateway(
     println!("  🌐 Web Dashboard: http://{display_addr}/");
     println!("  POST /pair      — pair a new client (X-Pairing-Code header)");
     println!("  POST /webhook   — {{\"message\": \"your prompt\"}}");
-    println!("  POST /sop/...   — SOP-only webhook dispatch (custom paths)");
     if whatsapp_channel.is_some() {
         println!("  GET  /whatsapp  — Meta webhook verification");
         println!("  POST /whatsapp  — WhatsApp message webhook");
@@ -645,9 +643,6 @@ pub async fn run_gateway(
         tools_registry,
         cost_tracker,
         event_tx,
-        sop_engine,
-        sop_audit,
-        sop_collector,
     };
 
     // Config PUT needs larger body limit (1MB)
@@ -662,7 +657,6 @@ pub async fn run_gateway(
         .route("/metrics", get(handle_metrics))
         .route("/pair", post(handle_pair))
         .route("/webhook", post(handle_webhook))
-        .route("/sop/{*rest}", post(handle_sop_webhook))
         .route("/whatsapp", get(handle_whatsapp_verify))
         .route("/whatsapp", post(handle_whatsapp_message))
         .route("/linq", post(handle_linq_webhook))
@@ -719,7 +713,6 @@ pub async fn run_gateway(
 async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
     let body = serde_json::json!({
         "status": "ok",
-        "require_pairing": state.pairing.require_pairing(),
         "paired": state.pairing.is_paired(),
         "require_pairing": state.pairing.require_pairing(),
         "runtime": crate::health::snapshot_json(),
@@ -877,7 +870,6 @@ pub struct WebhookBody {
 async fn handle_webhook(
     State(state): State<AppState>,
     ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
-    uri: axum::http::Uri,
     headers: HeaderMap,
     body: Result<Json<WebhookBody>, axum::extract::rejection::JsonRejection>,
 ) -> impl IntoResponse {
@@ -945,8 +937,7 @@ async fn handle_webhook(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let namespaced_key = format!("webhook:{idempotency_key}");
-        if !state.idempotency_store.record_if_new(&namespaced_key) {
+        if !state.idempotency_store.record_if_new(idempotency_key) {
             tracing::info!("Webhook duplicate ignored (idempotency key: {idempotency_key})");
             let body = serde_json::json!({
                 "status": "duplicate",
@@ -955,55 +946,6 @@ async fn handle_webhook(
             });
             return (StatusCode::OK, Json(body));
         }
-    }
-
-    // ── SOP webhook dispatch (if configured) ──
-    if let (Some(ref engine), Some(ref audit)) = (&state.sop_engine, &state.sop_audit) {
-        let event = crate::sop::SopEvent {
-            source: crate::sop::SopTriggerSource::Webhook,
-            topic: Some(uri.path().to_string()),
-            payload: Some(webhook_body.message.clone()),
-            timestamp: crate::sop::engine::now_iso8601(),
-        };
-        // Quick match check: single lock, no I/O
-        let matched_names = {
-            let eng = engine.lock();
-            match eng {
-                Ok(eng) => eng
-                    .match_trigger(&event)
-                    .iter()
-                    .map(|s| s.name.clone())
-                    .collect::<Vec<_>>(),
-                Err(e) => {
-                    tracing::error!("SOP engine lock poisoned in webhook handler: {e}");
-                    let body = serde_json::json!({
-                        "error": "internal server error",
-                        "detail": "SOP engine unavailable"
-                    });
-                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(body));
-                }
-            }
-        };
-        if !matched_names.is_empty() {
-            // Spawn dispatch asynchronously — audit I/O runs in background
-            let engine = Arc::clone(engine);
-            let audit = Arc::clone(audit);
-            tokio::spawn(
-                async move {
-                    let results =
-                        crate::sop::dispatch::dispatch_sop_event(&engine, &audit, event).await;
-                    crate::sop::dispatch::process_headless_results(&results).await;
-                }
-                .instrument(tracing::info_span!("sop_dispatch", source = "webhook")),
-            );
-            let body = serde_json::json!({
-                "status": "accepted",
-                "matched_sops": matched_names,
-                "source": "webhook"
-            });
-            return (StatusCode::ACCEPTED, Json(body));
-        }
-        // No SOP match → fall through to LLM
     }
 
     let message = &webhook_body.message;
@@ -1108,150 +1050,6 @@ async fn handle_webhook(
             (StatusCode::INTERNAL_SERVER_ERROR, Json(err))
         }
     }
-}
-
-/// POST /sop/{*rest} — SOP-only webhook dispatch for custom paths.
-///
-/// Unlike `/webhook`, this handler only performs SOP trigger matching.
-/// If no SOP matches the path, returns 404 (no LLM fallback).
-/// Auth (pairing + webhook secret) is enforced identically to `/webhook`.
-async fn handle_sop_webhook(
-    State(state): State<AppState>,
-    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
-    uri: axum::http::Uri,
-    headers: HeaderMap,
-    body: Result<Json<WebhookBody>, axum::extract::rejection::JsonRejection>,
-) -> impl IntoResponse {
-    // ── Rate limit ──
-    let client_key =
-        client_key_from_request(Some(peer_addr), &headers, state.trust_forwarded_headers);
-    if !state.rate_limiter.allow_webhook(&client_key) {
-        tracing::warn!("/sop rate limit exceeded for key: {client_key}");
-        let err = serde_json::json!({
-            "error": "Too many requests. Please retry later.",
-            "retry_after": RATE_LIMIT_WINDOW_SECS,
-        });
-        return (StatusCode::TOO_MANY_REQUESTS, Json(err));
-    }
-
-    // ── Auth: pairing ──
-    if state.pairing.require_pairing() {
-        let auth = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        let token = auth.strip_prefix("Bearer ").unwrap_or("");
-        if !state.pairing.is_authenticated(token) {
-            tracing::warn!("SOP webhook: rejected — not paired / invalid bearer token");
-            let err = serde_json::json!({
-                "error": "Unauthorized — pair first via POST /pair, then send Authorization: Bearer <token>"
-            });
-            return (StatusCode::UNAUTHORIZED, Json(err));
-        }
-    }
-
-    // ── Auth: webhook secret ──
-    if let Some(ref secret_hash) = state.webhook_secret_hash {
-        let header_hash = headers
-            .get("X-Webhook-Secret")
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(hash_webhook_secret);
-        match header_hash {
-            Some(val) if constant_time_eq(&val, secret_hash.as_ref()) => {}
-            _ => {
-                tracing::warn!("SOP webhook: rejected — invalid or missing X-Webhook-Secret");
-                let err = serde_json::json!({
-                    "error": "Invalid or missing X-Webhook-Secret"
-                });
-                return (StatusCode::UNAUTHORIZED, Json(err));
-            }
-        }
-    }
-
-    // ── Parse body ──
-    let Json(webhook_body) = match body {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!("SOP webhook JSON parse error: {e}");
-            let err = serde_json::json!({
-                "error": "Invalid JSON body. Expected: {\"message\": \"...\"}"
-            });
-            return (StatusCode::BAD_REQUEST, Json(err));
-        }
-    };
-
-    // ── Idempotency (optional) ──
-    if let Some(idempotency_key) = headers
-        .get("X-Idempotency-Key")
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        let namespaced_key = format!("sop:{idempotency_key}");
-        if !state.idempotency_store.record_if_new(&namespaced_key) {
-            tracing::info!("SOP webhook duplicate ignored (idempotency key: {idempotency_key})");
-            let body = serde_json::json!({
-                "status": "duplicate",
-                "idempotent": true,
-                "message": "Request already processed for this idempotency key"
-            });
-            return (StatusCode::OK, Json(body));
-        }
-    }
-
-    // ── SOP dispatch ──
-    if let (Some(ref engine), Some(ref audit)) = (&state.sop_engine, &state.sop_audit) {
-        let event = crate::sop::SopEvent {
-            source: crate::sop::SopTriggerSource::Webhook,
-            topic: Some(uri.path().to_string()),
-            payload: Some(webhook_body.message.clone()),
-            timestamp: crate::sop::engine::now_iso8601(),
-        };
-        let matched_names = match engine.lock() {
-            Ok(eng) => eng
-                .match_trigger(&event)
-                .iter()
-                .map(|s| s.name.clone())
-                .collect::<Vec<_>>(),
-            Err(e) => {
-                tracing::error!("SOP engine lock poisoned in /sop handler: {e}");
-                let err = serde_json::json!({"error": "Internal server error"});
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(err));
-            }
-        };
-        if !matched_names.is_empty() {
-            let engine = Arc::clone(engine);
-            let audit = Arc::clone(audit);
-            tokio::spawn(
-                async move {
-                    let results =
-                        crate::sop::dispatch::dispatch_sop_event(&engine, &audit, event).await;
-                    crate::sop::dispatch::process_headless_results(&results).await;
-                }
-                .instrument(tracing::info_span!("sop_dispatch", source = "sop_webhook")),
-            );
-            let body = serde_json::json!({
-                "status": "accepted",
-                "matched_sops": matched_names,
-                "source": "sop_webhook",
-                "path": uri.path(),
-            });
-            return (StatusCode::ACCEPTED, Json(body));
-        }
-    } else {
-        // SOP engine not configured — this endpoint requires it
-        let err = serde_json::json!({"error": "SOP engine not available"});
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(err));
-    }
-
-    // No SOP match — 404 (no LLM fallback on /sop/* routes)
-    let err = serde_json::json!({
-        "error": "No SOP matched this path",
-        "path": uri.path(),
-    });
-    (StatusCode::NOT_FOUND, Json(err))
 }
 
 /// `WhatsApp` verification query params
@@ -1800,9 +1598,6 @@ mod tests {
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
-            sop_engine: None,
-            sop_audit: None,
-            sop_collector: None,
         };
 
         let response = handle_metrics(State(state)).await.into_response();
@@ -1847,13 +1642,11 @@ mod tests {
             linq_signing_secret: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
+            wati: None,
             observer,
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
-            sop_engine: None,
-            sop_audit: None,
-            sop_collector: None,
         };
 
         let response = handle_metrics(State(state)).await.into_response();
@@ -2191,10 +1984,6 @@ mod tests {
         ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 30_300)))
     }
 
-    fn test_uri() -> axum::http::Uri {
-        "/webhook".parse::<axum::http::Uri>().unwrap()
-    }
-
     #[tokio::test]
     async fn webhook_idempotency_skips_duplicate_provider_calls() {
         let provider_impl = Arc::new(MockProvider::default());
@@ -2224,9 +2013,6 @@ mod tests {
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
-            sop_engine: None,
-            sop_audit: None,
-            sop_collector: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -2238,7 +2024,6 @@ mod tests {
         let first = handle_webhook(
             State(state.clone()),
             test_connect_info(),
-            test_uri(),
             headers.clone(),
             body,
         )
@@ -2249,7 +2034,7 @@ mod tests {
         let body = Ok(Json(WebhookBody {
             message: "hello".into(),
         }));
-        let second = handle_webhook(State(state), test_connect_info(), test_uri(), headers, body)
+        let second = handle_webhook(State(state), test_connect_info(), headers, body)
             .await
             .into_response();
         assert_eq!(second.status(), StatusCode::OK);
@@ -2292,9 +2077,6 @@ mod tests {
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
-            sop_engine: None,
-            sop_audit: None,
-            sop_collector: None,
         };
 
         let headers = HeaderMap::new();
@@ -2305,7 +2087,6 @@ mod tests {
         let first = handle_webhook(
             State(state.clone()),
             test_connect_info(),
-            test_uri(),
             headers.clone(),
             body1,
         )
@@ -2316,15 +2097,9 @@ mod tests {
         let body2 = Ok(Json(WebhookBody {
             message: "hello two".into(),
         }));
-        let second = handle_webhook(
-            State(state),
-            test_connect_info(),
-            test_uri(),
-            headers,
-            body2,
-        )
-        .await
-        .into_response();
+        let second = handle_webhook(State(state), test_connect_info(), headers, body2)
+            .await
+            .into_response();
         assert_eq!(second.status(), StatusCode::OK);
 
         let keys = tracking_impl.keys.lock().clone();
@@ -2378,15 +2153,11 @@ mod tests {
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
-            sop_engine: None,
-            sop_audit: None,
-            sop_collector: None,
         };
 
         let response = handle_webhook(
             State(state),
             test_connect_info(),
-            test_uri(),
             HeaderMap::new(),
             Ok(Json(WebhookBody {
                 message: "hello".into(),
@@ -2430,9 +2201,6 @@ mod tests {
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
-            sop_engine: None,
-            sop_audit: None,
-            sop_collector: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -2444,7 +2212,6 @@ mod tests {
         let response = handle_webhook(
             State(state),
             test_connect_info(),
-            test_uri(),
             headers,
             Ok(Json(WebhookBody {
                 message: "hello".into(),
@@ -2487,9 +2254,6 @@ mod tests {
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
-            sop_engine: None,
-            sop_audit: None,
-            sop_collector: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -2498,7 +2262,6 @@ mod tests {
         let response = handle_webhook(
             State(state),
             test_connect_info(),
-            test_uri(),
             headers,
             Ok(Json(WebhookBody {
                 message: "hello".into(),
@@ -2549,9 +2312,6 @@ mod tests {
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
-            sop_engine: None,
-            sop_audit: None,
-            sop_collector: None,
         };
 
         let response = handle_nextcloud_talk_webhook(
@@ -2601,13 +2361,11 @@ mod tests {
             linq_signing_secret: None,
             nextcloud_talk: Some(channel),
             nextcloud_talk_webhook_secret: Some(Arc::from(secret)),
+            wati: None,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
-            sop_engine: None,
-            sop_audit: None,
-            sop_collector: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -3013,223 +2771,5 @@ mod tests {
 
         // Should be allowed again
         assert!(limiter.allow("burst-ip"));
-    }
-
-    // ── /sop/* handler tests ──────────────────────────────────────
-
-    fn test_sop_state_with_engine() -> AppState {
-        use crate::sop::types::*;
-        let mut engine = crate::sop::engine::SopEngine::new(crate::config::SopConfig::default());
-        engine.set_sops_for_test(vec![Sop {
-            name: "deploy-sop".into(),
-            description: "test".into(),
-            version: "1.0".into(),
-            priority: SopPriority::Normal,
-            execution_mode: SopExecutionMode::Auto,
-            triggers: vec![SopTrigger::Webhook {
-                path: "/sop/deploy".into(),
-            }],
-            steps: vec![SopStep {
-                number: 1,
-                title: "Deploy".into(),
-                body: "Run deploy".into(),
-                suggested_tools: vec![],
-                requires_confirmation: false,
-            }],
-            cooldown_secs: 0,
-            max_concurrent: 1,
-            location: None,
-        }]);
-        let sop_engine = Arc::new(std::sync::Mutex::new(engine));
-        let audit = Arc::new(crate::sop::SopAuditLogger::new(
-            Arc::new(MockMemory) as Arc<dyn Memory>
-        ));
-        AppState {
-            config: Arc::new(Mutex::new(Config::default())),
-            provider: Arc::new(MockProvider::default()),
-            model: "test-model".into(),
-            temperature: 0.0,
-            mem: Arc::new(MockMemory),
-            auto_save: false,
-            webhook_secret_hash: None,
-            pairing: Arc::new(PairingGuard::new(false, &[])),
-            trust_forwarded_headers: false,
-            rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
-            idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-            whatsapp: None,
-            whatsapp_app_secret: None,
-            linq: None,
-            linq_signing_secret: None,
-            nextcloud_talk: None,
-            nextcloud_talk_webhook_secret: None,
-            observer: Arc::new(crate::observability::NoopObserver),
-            tools_registry: Arc::new(Vec::new()),
-            cost_tracker: None,
-            event_tx: tokio::sync::broadcast::channel(16).0,
-            sop_engine: Some(sop_engine),
-            sop_audit: Some(audit),
-            sop_collector: None,
-        }
-    }
-
-    fn test_sop_uri() -> axum::http::Uri {
-        "/sop/deploy".parse::<axum::http::Uri>().unwrap()
-    }
-
-    #[tokio::test]
-    async fn sop_webhook_returns_accepted_on_match() {
-        let state = test_sop_state_with_engine();
-        let headers = HeaderMap::new();
-        let body = Ok(Json(WebhookBody {
-            message: "deploy now".into(),
-        }));
-        let resp = handle_sop_webhook(
-            State(state),
-            test_connect_info(),
-            test_sop_uri(),
-            headers,
-            body,
-        )
-        .await
-        .into_response();
-        assert_eq!(resp.status(), StatusCode::ACCEPTED);
-        let payload = resp.into_body().collect().await.unwrap().to_bytes();
-        let parsed: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-        assert_eq!(parsed["status"], "accepted");
-        assert!(parsed["matched_sops"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|v| v == "deploy-sop"));
-    }
-
-    #[tokio::test]
-    async fn sop_webhook_returns_404_on_no_match() {
-        let state = test_sop_state_with_engine();
-        let headers = HeaderMap::new();
-        let uri = "/sop/unknown".parse::<axum::http::Uri>().unwrap();
-        let body = Ok(Json(WebhookBody {
-            message: "test".into(),
-        }));
-        let resp = handle_sop_webhook(State(state), test_connect_info(), uri, headers, body)
-            .await
-            .into_response();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn sop_webhook_returns_503_when_engine_missing() {
-        let state = AppState {
-            config: Arc::new(Mutex::new(Config::default())),
-            provider: Arc::new(MockProvider::default()),
-            model: "test-model".into(),
-            temperature: 0.0,
-            mem: Arc::new(MockMemory),
-            auto_save: false,
-            webhook_secret_hash: None,
-            pairing: Arc::new(PairingGuard::new(false, &[])),
-            trust_forwarded_headers: false,
-            rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
-            idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-            whatsapp: None,
-            whatsapp_app_secret: None,
-            linq: None,
-            linq_signing_secret: None,
-            nextcloud_talk: None,
-            nextcloud_talk_webhook_secret: None,
-            observer: Arc::new(crate::observability::NoopObserver),
-            tools_registry: Arc::new(Vec::new()),
-            cost_tracker: None,
-            event_tx: tokio::sync::broadcast::channel(16).0,
-            sop_engine: None,
-            sop_audit: None,
-            sop_collector: None,
-        };
-        let headers = HeaderMap::new();
-        let body = Ok(Json(WebhookBody {
-            message: "test".into(),
-        }));
-        let resp = handle_sop_webhook(
-            State(state),
-            test_connect_info(),
-            test_sop_uri(),
-            headers,
-            body,
-        )
-        .await
-        .into_response();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
-
-    #[tokio::test]
-    async fn sop_webhook_idempotency_skips_duplicate() {
-        let state = test_sop_state_with_engine();
-        let mut headers = HeaderMap::new();
-        headers.insert("X-Idempotency-Key", HeaderValue::from_static("dedup-1"));
-        let body = Ok(Json(WebhookBody {
-            message: "deploy now".into(),
-        }));
-        let first = handle_sop_webhook(
-            State(state.clone()),
-            test_connect_info(),
-            test_sop_uri(),
-            headers.clone(),
-            body,
-        )
-        .await
-        .into_response();
-        assert_eq!(first.status(), StatusCode::ACCEPTED);
-
-        let body = Ok(Json(WebhookBody {
-            message: "deploy now".into(),
-        }));
-        let second = handle_sop_webhook(
-            State(state),
-            test_connect_info(),
-            test_sop_uri(),
-            headers,
-            body,
-        )
-        .await
-        .into_response();
-        assert_eq!(second.status(), StatusCode::OK);
-        let payload = second.into_body().collect().await.unwrap().to_bytes();
-        let parsed: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-        assert_eq!(parsed["status"], "duplicate");
-    }
-
-    #[tokio::test]
-    async fn idempotency_key_namespaced_per_endpoint() {
-        let state = test_sop_state_with_engine();
-
-        // Send to /sop/* with key "shared-key"
-        let mut headers = HeaderMap::new();
-        headers.insert("X-Idempotency-Key", HeaderValue::from_static("shared-key"));
-        let body = Ok(Json(WebhookBody {
-            message: "deploy now".into(),
-        }));
-        let sop_resp = handle_sop_webhook(
-            State(state.clone()),
-            test_connect_info(),
-            test_sop_uri(),
-            headers.clone(),
-            body,
-        )
-        .await
-        .into_response();
-        assert_eq!(sop_resp.status(), StatusCode::ACCEPTED);
-
-        // Same key to /webhook should NOT be treated as duplicate
-        let body = Ok(Json(WebhookBody {
-            message: "deploy now".into(),
-        }));
-        let wh_resp = handle_webhook(State(state), test_connect_info(), test_uri(), headers, body)
-            .await
-            .into_response();
-        // Should get 200 (LLM response), not "duplicate"
-        assert_eq!(wh_resp.status(), StatusCode::OK);
-        let payload = wh_resp.into_body().collect().await.unwrap().to_bytes();
-        let parsed: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-        assert_ne!(parsed["status"], "duplicate");
     }
 }

@@ -1043,33 +1043,6 @@ mod tests {
     }
 
     #[test]
-    fn convert_messages_extracts_local_image_marker_as_base64() {
-        use base64::Engine as _;
-
-        let temp = tempfile::tempdir().unwrap();
-        let image_path = temp.path().join("sample.jpg");
-        let bytes = [0xff, 0xd8, 0xff];
-        std::fs::write(&image_path, bytes).unwrap();
-
-        let provider = OllamaProvider::new(None, None);
-        let messages = vec![ChatMessage {
-            role: "user".into(),
-            content: format!("Describe this [IMAGE:{}]", image_path.display()),
-        }];
-
-        let converted = provider.convert_messages(&messages);
-        assert_eq!(converted.len(), 1);
-        let images = converted[0]
-            .images
-            .as_ref()
-            .expect("images should be present");
-        assert_eq!(
-            images,
-            &vec![base64::engine::general_purpose::STANDARD.encode(bytes)]
-        );
-    }
-
-    #[test]
     fn capabilities_include_native_tools_and_vision() {
         let provider = OllamaProvider::new(None, None);
         let caps = <OllamaProvider as Provider>::capabilities(&provider);

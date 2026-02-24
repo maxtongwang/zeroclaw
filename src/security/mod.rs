@@ -35,7 +35,6 @@ pub mod firejail;
 pub mod landlock;
 pub mod otp;
 pub mod pairing;
-pub mod plugin;
 pub mod policy;
 pub mod secrets;
 pub mod traits;

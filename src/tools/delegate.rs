@@ -248,10 +248,9 @@ impl Tool for DelegateTool {
         #[allow(clippy::option_as_ref_deref)]
         let provider_credential = provider_credential_owned.as_ref().map(String::as_str);
 
-        let provider: Box<dyn Provider> = match providers::create_provider_with_url_and_options(
+        let provider: Box<dyn Provider> = match providers::create_provider_with_options(
             &agent_config.provider,
             provider_credential,
-            agent_config.api_url.as_deref(),
             &self.provider_runtime_options,
         ) {
             Ok(p) => p,
@@ -515,7 +514,6 @@ mod tests {
                 model: "llama3".to_string(),
                 system_prompt: Some("You are a research assistant.".to_string()),
                 api_key: None,
-                api_url: None,
                 temperature: Some(0.3),
                 max_depth: 3,
                 agentic: false,
@@ -530,7 +528,6 @@ mod tests {
                 model: "anthropic/claude-sonnet-4-20250514".to_string(),
                 system_prompt: None,
                 api_key: Some("delegate-test-credential".to_string()),
-                api_url: None,
                 temperature: None,
                 max_depth: 2,
                 agentic: false,
@@ -684,7 +681,6 @@ mod tests {
             model: "model-test".to_string(),
             system_prompt: Some("You are agentic.".to_string()),
             api_key: Some("delegate-test-credential".to_string()),
-            api_url: None,
             temperature: Some(0.2),
             max_depth: 3,
             agentic: true,
@@ -793,7 +789,6 @@ mod tests {
                 model: "model".to_string(),
                 system_prompt: None,
                 api_key: None,
-                api_url: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -900,7 +895,6 @@ mod tests {
                 model: "test-model".to_string(),
                 system_prompt: None,
                 api_key: None,
-                api_url: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -936,7 +930,6 @@ mod tests {
                 model: "test-model".to_string(),
                 system_prompt: None,
                 api_key: None,
-                api_url: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,

@@ -462,7 +462,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_read_outside_workspace_allowed_when_workspace_only_disabled() {
+    async fn file_read_outside_workspace_guides_allowed_roots() {
         let root = std::env::temp_dir().join("zeroclaw_test_file_read_allowed_roots_hint");
         let workspace = root.join("workspace");
         let outside = root.join("outside");
@@ -478,41 +478,6 @@ mod tests {
             workspace_dir: workspace,
             workspace_only: false,
             forbidden_paths: vec![],
-            ..SecurityPolicy::default()
-        });
-        let tool = FileReadTool::new(security);
-
-        let result = tool
-            .execute(json!({"path": outside_file.to_string_lossy().to_string()}))
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        assert!(result.output.contains("1: outside"));
-
-        let _ = tokio::fs::remove_dir_all(&root).await;
-    }
-
-    #[tokio::test]
-    async fn file_read_outside_workspace_guides_allowed_roots_when_scoped_roots_configured() {
-        let root = std::env::temp_dir().join("zeroclaw_test_file_read_allowed_roots_scoped_hint");
-        let workspace = root.join("workspace");
-        let outside = root.join("outside");
-        let scoped = root.join("scoped");
-        let outside_file = outside.join("notes.txt");
-
-        let _ = tokio::fs::remove_dir_all(&root).await;
-        tokio::fs::create_dir_all(&workspace).await.unwrap();
-        tokio::fs::create_dir_all(&outside).await.unwrap();
-        tokio::fs::create_dir_all(&scoped).await.unwrap();
-        tokio::fs::write(&outside_file, "outside").await.unwrap();
-
-        let security = Arc::new(SecurityPolicy {
-            autonomy: AutonomyLevel::Supervised,
-            workspace_dir: workspace,
-            workspace_only: false,
-            forbidden_paths: vec![],
-            allowed_roots: vec![scoped],
             ..SecurityPolicy::default()
         });
         let tool = FileReadTool::new(security);
