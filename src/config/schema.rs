@@ -2238,6 +2238,16 @@ pub struct RuntimeConfig {
     /// - `Some(false)`: disable reasoning/thinking when supported
     #[serde(default)]
     pub reasoning_enabled: Option<bool>,
+
+    /// Reasoning effort level for providers that support configurable reasoning.
+    /// Valid values: "low", "medium", "high", "xhigh".
+    /// - `None`: provider default (typically "high" or equivalent)
+    /// - `Some(level)`: request specific reasoning effort level
+    ///
+    /// Note: Not all providers support all levels. Invalid levels are clamped
+    /// to valid values by each provider.
+    #[serde(default)]
+    pub reasoning_level: Option<String>,
 }
 
 /// Docker runtime configuration (`[runtime.docker]` section).
@@ -2312,6 +2322,7 @@ impl Default for RuntimeConfig {
             kind: default_runtime_kind(),
             docker: DockerRuntimeConfig::default(),
             reasoning_enabled: None,
+            reasoning_level: None,
         }
     }
 }
@@ -4825,6 +4836,16 @@ impl Config {
                 "1" | "true" | "yes" | "on" => self.model_support_vision = Some(true),
                 "0" | "false" | "no" | "off" => self.model_support_vision = Some(false),
                 _ => {}
+            }
+        }
+
+        // Reasoning level: ZEROCLAW_REASONING_LEVEL or REASONING_LEVEL
+        if let Ok(level) = std::env::var("ZEROCLAW_REASONING_LEVEL")
+            .or_else(|_| std::env::var("REASONING_LEVEL"))
+        {
+            let level = level.trim().to_ascii_lowercase();
+            if matches!(level.as_str(), "low" | "medium" | "high" | "xhigh" | "minimal") {
+                self.runtime.reasoning_level = Some(level);
             }
         }
 
@@ -7454,6 +7475,37 @@ default_model = "legacy-model"
         assert_eq!(config.model_support_vision, Some(true));
 
         std::env::remove_var("ZEROCLAW_MODEL_SUPPORT_VISION");
+    }
+
+    #[test]
+    async fn env_override_reasoning_level() {
+        let _env_guard = env_override_lock().await;
+        let mut config = Config::default();
+        assert_eq!(config.runtime.reasoning_level, None);
+
+        std::env::set_var("ZEROCLAW_REASONING_LEVEL", "high");
+        config.apply_env_overrides();
+        assert_eq!(config.runtime.reasoning_level, Some("high".to_string()));
+
+        std::env::set_var("ZEROCLAW_REASONING_LEVEL", "xhigh");
+        config.apply_env_overrides();
+        assert_eq!(config.runtime.reasoning_level, Some("xhigh".to_string()));
+
+        std::env::remove_var("ZEROCLAW_REASONING_LEVEL");
+    }
+
+    #[test]
+    async fn env_override_reasoning_level_invalid_ignored() {
+        let _env_guard = env_override_lock().await;
+        let mut config = Config::default();
+        config.runtime.reasoning_level = Some("medium".to_string());
+
+        std::env::set_var("ZEROCLAW_REASONING_LEVEL", "invalid");
+        config.apply_env_overrides();
+        // Invalid value should not change the config
+        assert_eq!(config.runtime.reasoning_level, Some("medium".to_string()));
+
+        std::env::remove_var("ZEROCLAW_REASONING_LEVEL");
     }
 
     #[test]

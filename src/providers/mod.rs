@@ -678,6 +678,8 @@ pub struct ProviderRuntimeOptions {
     pub zeroclaw_dir: Option<PathBuf>,
     pub secrets_encrypt: bool,
     pub reasoning_enabled: Option<bool>,
+    /// Reasoning effort level ("low", "medium", "high", "xhigh", "minimal").
+    pub reasoning_level: Option<String>,
     pub custom_provider_api_mode: Option<CompatibleApiMode>,
     pub max_tokens_override: Option<u32>,
     pub model_support_vision: Option<bool>,
@@ -691,6 +693,7 @@ impl Default for ProviderRuntimeOptions {
             zeroclaw_dir: None,
             secrets_encrypt: true,
             reasoning_enabled: None,
+            reasoning_level: None,
             custom_provider_api_mode: None,
             max_tokens_override: None,
             model_support_vision: None,

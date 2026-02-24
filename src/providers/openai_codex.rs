@@ -22,6 +22,8 @@ pub struct OpenAiCodexProvider {
     custom_endpoint: bool,
     gateway_api_key: Option<String>,
     client: Client,
+    /// Configured reasoning level from config (low, medium, high, xhigh).
+    reasoning_level: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -109,6 +111,7 @@ impl OpenAiCodexProvider {
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .build()
                 .unwrap_or_else(|_| Client::new()),
+            reasoning_level: options.reasoning_level.clone(),
         })
     }
 }
@@ -304,11 +307,16 @@ fn clamp_reasoning_effort(model: &str, effort: &str) -> String {
     effort.to_string()
 }
 
-fn resolve_reasoning_effort(model_id: &str) -> String {
-    let raw = std::env::var("ZEROCLAW_CODEX_REASONING_EFFORT")
-        .ok()
-        .and_then(|value| first_nonempty(Some(&value)))
-        .unwrap_or_else(|| "xhigh".to_string())
+fn resolve_reasoning_effort(model_id: &str, config_level: Option<&str>) -> String {
+    // Priority: config value > env var > default
+    let raw = config_level
+        .and_then(|s| if s.is_empty() { None } else { Some(s.to_string()) })
+        .or_else(|| {
+            std::env::var("ZEROCLAW_CODEX_REASONING_EFFORT")
+                .ok()
+                .and_then(|value| first_nonempty(Some(&value)))
+        })
+        .unwrap_or_else(|| "high".to_string())
         .to_ascii_lowercase();
     clamp_reasoning_effort(model_id, &raw)
 }
@@ -572,7 +580,7 @@ impl OpenAiCodexProvider {
                 verbosity: "medium".to_string(),
             },
             reasoning: ResponsesReasoningOptions {
-                effort: resolve_reasoning_effort(normalized_model),
+                effort: resolve_reasoning_effort(normalized_model, self.reasoning_level.as_deref()),
                 summary: "auto".to_string(),
             },
             include: vec!["reasoning.encrypted_content".to_string()],
@@ -874,6 +882,38 @@ mod tests {
     }
 
     #[test]
+    fn resolve_reasoning_effort_uses_config_level_when_provided() {
+        // Config level takes priority
+        assert_eq!(
+            resolve_reasoning_effort("gpt-5-codex", Some("low")),
+            "low".to_string()
+        );
+        assert_eq!(
+            resolve_reasoning_effort("gpt-5-codex", Some("medium")),
+            "medium".to_string()
+        );
+        // Config level is clamped appropriately
+        assert_eq!(
+            resolve_reasoning_effort("gpt-5-codex", Some("xhigh")),
+            "high".to_string()
+        );
+    }
+
+    #[test]
+    fn resolve_reasoning_effort_uses_default_when_no_config() {
+        // No config, no env var -> default "high"
+        let result = resolve_reasoning_effort("gpt-5.3-codex", None);
+        assert_eq!(result, "high".to_string());
+    }
+
+    #[test]
+    fn resolve_reasoning_effort_empty_config_uses_default() {
+        // Empty config string is treated as None
+        let result = resolve_reasoning_effort("gpt-5.3-codex", Some(""));
+        assert_eq!(result, "high".to_string());
+    }
+
+    #[test]
     fn parse_sse_text_reads_output_text_delta() {
         let payload = r#"data: {"type":"response.created","response":{"id":"resp_123"}}
 
@@ -1032,6 +1072,7 @@ data: [DONE]
             secrets_encrypt: false,
             auth_profile_override: None,
             reasoning_enabled: None,
+            reasoning_level: None,
             custom_provider_api_mode: None,
             max_tokens_override: None,
             model_support_vision: None,
