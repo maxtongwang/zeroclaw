@@ -1,15 +1,24 @@
 # syntax=docker/dockerfile:1.7
 
+# Build arguments for feature customization
+# Usage: docker build --build-arg CARGO_FEATURES="channel-matrix,browser-native" .
+ARG CARGO_FEATURES="channel-matrix,browser-native,whatsapp-web"
+
 # ── Stage 1: Build ────────────────────────────────────────────
 FROM rust:1.93-slim@sha256:9663b80a1621253d30b146454f903de48f0af925c967be48c84745537cd35d8b AS builder
 
+# Re-declare ARG after FROM to use in this stage
+ARG CARGO_FEATURES
+
 WORKDIR /app
 
-# Install build dependencies
+# Install build dependencies (including protobuf for whatsapp-web/matrix features)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y \
         pkg-config \
+        protobuf-compiler \
+        libprotobuf-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # 1. Copy manifests to cache dependencies
@@ -23,7 +32,11 @@ RUN mkdir -p src benches crates/robot-kit/src \
 RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=zeroclaw-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=zeroclaw-target,target=/app/target,sharing=locked \
-    cargo build --release --locked
+    if [ -n "$CARGO_FEATURES" ]; then \
+        cargo build --release --locked --features "$CARGO_FEATURES"; \
+    else \
+        cargo build --release --locked; \
+    fi
 RUN rm -rf src benches crates/robot-kit/src
 
 # 2. Copy only build-relevant source paths (avoid cache-busting on docs/tests/scripts)
@@ -52,7 +65,11 @@ RUN mkdir -p web/dist && \
 RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=zeroclaw-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=zeroclaw-target,target=/app/target,sharing=locked \
-    cargo build --release --locked && \
+    if [ -n "$CARGO_FEATURES" ]; then \
+        cargo build --release --locked --features "$CARGO_FEATURES"; \
+    else \
+        cargo build --release --locked; \
+    fi && \
     cp target/release/zeroclaw /app/zeroclaw && \
     strip /app/zeroclaw
 
@@ -75,6 +92,14 @@ EOF
 
 # ── Stage 2: Development Runtime (Debian) ────────────────────
 FROM debian:trixie-slim@sha256:f6e2cfac5cf956ea044b4bd75e6397b4372ad88fe00908045e9a0d21712ae3ba AS dev
+
+# Re-declare ARG for label
+ARG CARGO_FEATURES
+
+# Labels for image metadata
+LABEL org.opencontainers.image.title="ZeroClaw (Dev)"
+LABEL org.opencontainers.image.description="ZeroClaw autonomous agent runtime - development image"
+LABEL org.zeroclaw.features="${CARGO_FEATURES}"
 
 # Install essential runtime dependencies only (use docker-compose.override.yml for dev tools)
 RUN apt-get update && apt-get install -y \
@@ -109,6 +134,14 @@ CMD ["gateway"]
 
 # ── Stage 3: Production Runtime (Distroless) ─────────────────
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:84fcd3c223b144b0cb6edc5ecc75641819842a9679a3a58fd6294bec47532bf7 AS release
+
+# Re-declare ARG for label
+ARG CARGO_FEATURES
+
+# Labels for image metadata
+LABEL org.opencontainers.image.title="ZeroClaw"
+LABEL org.opencontainers.image.description="ZeroClaw autonomous agent runtime - production image"
+LABEL org.zeroclaw.features="${CARGO_FEATURES}"
 
 COPY --from=builder /app/zeroclaw /usr/local/bin/zeroclaw
 COPY --from=builder /zeroclaw-data /zeroclaw-data
