@@ -7,21 +7,21 @@
 ## Επιλογή Γλώσσας
 
 - English README: [../README.md](../README.md)
-- Chinese README: [../README.zh-CN.md](../README.zh-CN.md)
-- Japanese README: [../README.ja.md](../README.ja.md)
-- Russian README: [../README.ru.md](../README.ru.md)
-- French README: [../README.fr.md](../README.fr.md)
-- Vietnamese README: [../README.vi.md](../README.vi.md)
-- Ελληνικό README: [../README.el.md](../README.el.md)
+- Chinese README: [../../README.zh-CN.md](../../README.zh-CN.md)
+- Japanese README: [../../README.ja.md](../../README.ja.md)
+- Russian README: [../../README.ru.md](../../README.ru.md)
+- French README: [../../README.fr.md](../../README.fr.md)
+- Vietnamese README: [../../README.vi.md](../../README.vi.md)
+- Ελληνικό README: [../../README.el.md](../../README.el.md)
 - English Docs Hub: [README.md](README.md)
-- Chinese Docs Hub: [README.zh-CN.md](README.zh-CN.md)
-- Japanese Docs Hub: [README.ja.md](README.ja.md)
-- Russian Docs Hub: [README.ru.md](README.ru.md)
-- French Docs Hub: [README.fr.md](README.fr.md)
-- Vietnamese Docs Hub: [i18n/vi/README.md](i18n/vi/README.md)
-- Ελληνικό Κέντρο Τεκμηρίωσης: [i18n/el/README.md](i18n/el/README.md)
-- Ευρετήριο μεταφράσεων i18n: [i18n/README.md](i18n/README.md)
-- Χάρτης κάλυψης i18n: [i18n-coverage.md](i18n-coverage.md)
+- Chinese Docs Hub: [../../README.zh-CN.md](../../README.zh-CN.md)
+- Japanese Docs Hub: [../../README.ja.md](../../README.ja.md)
+- Russian Docs Hub: [../../README.ru.md](../../README.ru.md)
+- French Docs Hub: [../../README.fr.md](../../README.fr.md)
+- Vietnamese Docs Hub: [../vi/README.md](../vi/README.md)
+- Ελληνικό Κέντρο Τεκμηρίωσης: [README.md](README.md)
+- Ευρετήριο μεταφράσεων i18n: [../README.md](../README.md)
+- Χάρτης κάλυψης i18n: [../../i18n-coverage.md](../../i18n-coverage.md)
 
 ## Θεματικές Ενότητες
 
@@ -29,6 +29,8 @@
 
 - [getting-started/README.md](getting-started/README.md)
 - [one-click-bootstrap.md](one-click-bootstrap.md)
+- [android-setup.md](android-setup.md)
+- [getting-started/macos-update-uninstall.md](getting-started/macos-update-uninstall.md)
 
 ### 2) Τεχνικές Αναφορές και Ενσωματώσεις
 
@@ -75,13 +77,29 @@
 ### 6) Διαδικασίες Συνεισφοράς και CI
 
 - [contributing/README.md](contributing/README.md)
-- [../CONTRIBUTING.md](../CONTRIBUTING.md)
+- [../../../CONTRIBUTING.el.md](../../../CONTRIBUTING.el.md)
 - [pr-workflow.md](pr-workflow.md)
 - [reviewer-playbook.md](reviewer-playbook.md)
 - [ci-map.md](ci-map.md)
 - [actions-source-policy.md](actions-source-policy.md)
 
-### 7) Κατάσταση Έργου και Στιγμιότυπα
+### 7) Τυποποιημένες Διαδικασίες Λειτουργίας (SOP)
+
+- [sop/README.md](sop/README.md)
+- [sop/syntax.md](sop/syntax.md)
+- [sop/connectivity.md](sop/connectivity.md)
+- [sop/observability.md](sop/observability.md)
+- [sop/cookbook.md](sop/cookbook.md)
+
+### 8) Δομή Τεκμηρίωσης
+
+- [structure/README.md](structure/README.md)
+
+### 9) Proxy και Προχωρημένες Ρυθμίσεις
+
+- [proxy-agent-playbook.md](proxy-agent-playbook.md)
+
+### 10) Κατάσταση Έργου και Στιγμιότυπα
 
 - [project/README.md](project/README.md)
 - [project-triage-snapshot-2026-02-18.md](project-triage-snapshot-2026-02-18.md)

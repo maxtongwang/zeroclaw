@@ -4,7 +4,7 @@
 
 Τελευταία ενημέρωση: **21 Φεβρουαρίου 2026**.
 
-Τοπικοποιημένα κέντρα: [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Русский](README.ru.md) · [Français](README.fr.md) · [Tiếng Việt](i18n/vi/README.md) · [Ελληνικά](README.md).
+Τοπικοποιημένα κέντρα: [简体中文](../../README.zh-CN.md) · [日本語](../../README.ja.md) · [Русский](../../README.ru.md) · [Français](../../README.fr.md) · [Tiếng Việt](../vi/README.md) · [Ελληνικά](README.md).
 
 ## Γρήγορη Εκκίνηση
 
@@ -61,7 +61,7 @@
 
 ### Συνεισφέροντες και Συντηρητές (Maintainers)
 
-- [../../../../CONTRIBUTING.el.md](../../../../CONTRIBUTING.el.md) — Οδηγός συνεισφοράς.
+- [../../../CONTRIBUTING.el.md](../../../CONTRIBUTING.el.md) — Οδηγός συνεισφοράς.
 - [pr-workflow.md](pr-workflow.md) — Διαδικασία υποβολής Pull Requests.
 - [reviewer-playbook.md](reviewer-playbook.md) — Οδηγός για αναθεωρητές κώδικα.
 - [ci-map.md](ci-map.md) — Διάγραμμα διαδικασιών CI.
@@ -83,6 +83,6 @@
 
 - Πλήρης πίνακας περιεχομένων: [SUMMARY.md](SUMMARY.md)
 - Κατάλογος και ταξινόμηση εγγράφων: [docs-inventory.md](docs-inventory.md)
-- Ευρετήριο μεταφράσεων i18n: [i18n/README.md](i18n/README.md)
-- Κατάσταση κάλυψης i18n: [i18n-coverage.md](i18n-coverage.md)
+- Ευρετήριο μεταφράσεων i18n: [../README.md](../README.md)
+- Κατάσταση κάλυψης i18n: [../../i18n-coverage.md](../../i18n-coverage.md)
 - Στιγμιότυπο διαχείρισης έργου: [project-triage-snapshot-2026-02-18.md](project-triage-snapshot-2026-02-18.md)
