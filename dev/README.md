@@ -153,6 +153,16 @@ Note: local `deny` focuses on license/source policy; advisory scanning is handle
 ./dev/cli.sh ci lint
 ```
 
+### 6. Test provider model availability (OAuth)
+
+```bash
+./dev/test_models.sh              # all models + profile rotation
+./dev/test_models.sh models       # model availability only
+./dev/test_models.sh profiles     # profile rotation only
+```
+
+Runs live Gemini model checks via OAuth (cloudcode-pa). Requires valid credentials in `~/.zeroclaw/auth-profiles.json`. See `tests/gemini_model_availability.rs` for test details.
+
 ### Isolation model
 
 - Rust compilation, tests, and audit/deny tools run in `zeroclaw-local-ci` container.

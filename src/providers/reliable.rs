@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use futures_util::{stream, StreamExt};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 // ── Error Classification ─────────────────────────────────────────────────
@@ -231,6 +232,8 @@ pub struct ReliableProvider {
     key_index: AtomicUsize,
     /// Per-model fallback chains: model_name → [fallback_model_1, fallback_model_2, ...]
     model_fallbacks: HashMap<String, Vec<String>>,
+    /// Provider health tracker with circuit breaker
+    health: Arc<super::health::ProviderHealthTracker>,
 }
 
 impl ReliableProvider {
@@ -239,6 +242,13 @@ impl ReliableProvider {
         max_retries: u32,
         base_backoff_ms: u64,
     ) -> Self {
+        // Default circuit breaker settings: 3 failures, 60s cooldown
+        let health = Arc::new(super::health::ProviderHealthTracker::new(
+            3,
+            Duration::from_secs(60),
+            100,
+        ));
+
         Self {
             providers,
             max_retries,
@@ -246,6 +256,7 @@ impl ReliableProvider {
             api_keys: Vec::new(),
             key_index: AtomicUsize::new(0),
             model_fallbacks: HashMap::new(),
+            health,
         }
     }
 
@@ -277,6 +288,41 @@ impl ReliableProvider {
         }
         let idx = self.key_index.fetch_add(1, Ordering::Relaxed) % self.api_keys.len();
         Some(&self.api_keys[idx])
+    }
+
+    /// Find alternative profiles of the same base provider.
+    ///
+    /// Given "gemini:gemini-1", returns other gemini profiles like "gemini:gemini-2"
+    /// that have closed circuit breakers.
+    ///
+    /// # Arguments
+    /// * `current_provider_name` - Full provider name with profile (e.g., "gemini:gemini-1")
+    ///
+    /// # Returns
+    /// Iterator of (provider_name, provider) tuples for alternative profiles
+    fn find_alternative_profiles<'a>(
+        &'a self,
+        current_provider_name: &'a str,
+    ) -> impl Iterator<Item = &'a (String, Box<dyn Provider>)> + 'a {
+        // Extract base provider name (before colon)
+        let base_provider = current_provider_name
+            .split_once(':')
+            .map(|(base, _)| base)
+            .unwrap_or(current_provider_name);
+
+        // Find all providers with same base but different profile
+        self.providers.iter().filter(move |(name, _)| {
+            // Check if this is the same base provider
+            let this_base = name
+                .split_once(':')
+                .map(|(base, _)| base)
+                .unwrap_or(name.as_str());
+
+            // Same base provider AND different name (different profile) AND circuit breaker closed
+            this_base == base_provider
+                && name != current_provider_name
+                && self.health.should_try(name).is_ok()
+        })
     }
 
     /// Compute backoff duration, respecting Retry-After if present.
@@ -318,6 +364,17 @@ impl Provider for ReliableProvider {
         // retryable error, sleep with exponential backoff and retry.
         for current_model in &models {
             for (provider_name, provider) in &self.providers {
+                // Check circuit breaker
+                if let Err((remaining, state)) = self.health.should_try(provider_name) {
+                    tracing::warn!(
+                        provider = provider_name,
+                        remaining_secs = remaining.as_secs(),
+                        failure_count = state.failure_count,
+                        "Skipping provider - circuit breaker open"
+                    );
+                    continue;
+                }
+
                 let mut backoff_ms = self.base_backoff_ms;
 
                 for attempt in 0..=self.max_retries {
@@ -326,6 +383,7 @@ impl Provider for ReliableProvider {
                         .await
                     {
                         Ok(resp) => {
+                            self.health.record_success(provider_name);
                             if attempt > 0 || *current_model != model {
                                 tracing::info!(
                                     provider = provider_name,
@@ -344,6 +402,9 @@ impl Provider for ReliableProvider {
                             let failure_reason = failure_reason(rate_limited, non_retryable);
                             let error_detail = compact_error_detail(&e);
 
+                            // Record failure in health tracker
+                            self.health.record_failure(provider_name, &error_detail);
+
                             push_failure(
                                 &mut failures,
                                 provider_name,
@@ -354,9 +415,66 @@ impl Provider for ReliableProvider {
                                 &error_detail,
                             );
 
-                            // Rate-limit with rotatable keys: cycle to the next API key
-                            // so the retry hits a different quota bucket.
-                            if rate_limited && !non_retryable_rate_limit {
+                            // Rate-limit: try alternative profiles of the same provider first,
+                            // before exhausting all retries. This provides fast failover
+                            // between multiple accounts of the same provider (e.g., gemini:account1 → gemini:account2).
+                            if rate_limited && !non_retryable_rate_limit && attempt == 0 {
+                                // On first rate limit, check for alternative profiles
+                                let alt_profiles: Vec<_> =
+                                    self.find_alternative_profiles(provider_name).collect();
+
+                                if !alt_profiles.is_empty() {
+                                    tracing::info!(
+                                        provider = provider_name,
+                                        alternative_count = alt_profiles.len(),
+                                        error = %error_detail,
+                                        "Rate limited on first attempt; trying alternative profiles of same provider"
+                                    );
+
+                                    // Try each alternative profile
+                                    for (alt_name, alt_provider) in &alt_profiles {
+                                        match alt_provider
+                                            .chat_with_system(
+                                                system_prompt,
+                                                message,
+                                                current_model,
+                                                temperature,
+                                            )
+                                            .await
+                                        {
+                                            Ok(resp) => {
+                                                self.health.record_success(alt_name);
+                                                tracing::info!(
+                                                    original_provider = provider_name,
+                                                    alternative_provider = alt_name,
+                                                    model = *current_model,
+                                                    "Profile rotation successful after rate limit"
+                                                );
+                                                return Ok(resp);
+                                            }
+                                            Err(alt_err) => {
+                                                // Record failure for alternative profile
+                                                let alt_error_detail =
+                                                    compact_error_detail(&alt_err);
+                                                self.health
+                                                    .record_failure(alt_name, &alt_error_detail);
+                                                tracing::debug!(
+                                                    alternative_provider = alt_name,
+                                                    error = %alt_error_detail,
+                                                    "Alternative profile also failed"
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    tracing::warn!(
+                                        provider = provider_name,
+                                        tried_alternatives = alt_profiles.len(),
+                                        "All alternative profiles failed; continuing with retry strategy"
+                                    );
+                                }
+
+                                // Fallback: try API key rotation (existing behavior, mostly non-functional)
                                 if let Some(new_key) = self.rotate_key() {
                                     tracing::warn!(
                                         provider = provider_name,
@@ -438,6 +556,17 @@ impl Provider for ReliableProvider {
 
         for current_model in &models {
             for (provider_name, provider) in &self.providers {
+                // Check circuit breaker
+                if let Err((remaining, state)) = self.health.should_try(provider_name) {
+                    tracing::warn!(
+                        provider = provider_name,
+                        remaining_secs = remaining.as_secs(),
+                        failure_count = state.failure_count,
+                        "Skipping provider - circuit breaker open"
+                    );
+                    continue;
+                }
+
                 let mut backoff_ms = self.base_backoff_ms;
 
                 for attempt in 0..=self.max_retries {
@@ -446,6 +575,7 @@ impl Provider for ReliableProvider {
                         .await
                     {
                         Ok(resp) => {
+                            self.health.record_success(provider_name);
                             if attempt > 0 || *current_model != model {
                                 tracing::info!(
                                     provider = provider_name,
@@ -464,6 +594,9 @@ impl Provider for ReliableProvider {
                             let failure_reason = failure_reason(rate_limited, non_retryable);
                             let error_detail = compact_error_detail(&e);
 
+                            // Record failure in health tracker
+                            self.health.record_failure(provider_name, &error_detail);
+
                             push_failure(
                                 &mut failures,
                                 provider_name,
@@ -474,7 +607,59 @@ impl Provider for ReliableProvider {
                                 &error_detail,
                             );
 
-                            if rate_limited && !non_retryable_rate_limit {
+                            // Rate-limit: try alternative profiles of the same provider first
+                            if rate_limited && !non_retryable_rate_limit && attempt == 0 {
+                                // On first rate limit, check for alternative profiles
+                                let alt_profiles: Vec<_> =
+                                    self.find_alternative_profiles(provider_name).collect();
+
+                                if !alt_profiles.is_empty() {
+                                    tracing::info!(
+                                        provider = provider_name,
+                                        alternative_count = alt_profiles.len(),
+                                        error = %error_detail,
+                                        "Rate limited on first attempt; trying alternative profiles of same provider"
+                                    );
+
+                                    // Try each alternative profile
+                                    for (alt_name, alt_provider) in &alt_profiles {
+                                        match alt_provider
+                                            .chat_with_history(messages, current_model, temperature)
+                                            .await
+                                        {
+                                            Ok(resp) => {
+                                                self.health.record_success(alt_name);
+                                                tracing::info!(
+                                                    original_provider = provider_name,
+                                                    alternative_provider = alt_name,
+                                                    model = *current_model,
+                                                    "Profile rotation successful after rate limit"
+                                                );
+                                                return Ok(resp);
+                                            }
+                                            Err(alt_err) => {
+                                                // Record failure for alternative profile
+                                                let alt_error_detail =
+                                                    compact_error_detail(&alt_err);
+                                                self.health
+                                                    .record_failure(alt_name, &alt_error_detail);
+                                                tracing::debug!(
+                                                    alternative_provider = alt_name,
+                                                    error = %alt_error_detail,
+                                                    "Alternative profile also failed"
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    tracing::warn!(
+                                        provider = provider_name,
+                                        tried_alternatives = alt_profiles.len(),
+                                        "All alternative profiles failed; continuing with retry strategy"
+                                    );
+                                }
+
+                                // Fallback: try API key rotation (existing behavior)
                                 if let Some(new_key) = self.rotate_key() {
                                     tracing::warn!(
                                         provider = provider_name,
@@ -562,6 +747,17 @@ impl Provider for ReliableProvider {
 
         for current_model in &models {
             for (provider_name, provider) in &self.providers {
+                // Check circuit breaker
+                if let Err((remaining, state)) = self.health.should_try(provider_name) {
+                    tracing::warn!(
+                        provider = provider_name,
+                        remaining_secs = remaining.as_secs(),
+                        failure_count = state.failure_count,
+                        "Skipping provider - circuit breaker open"
+                    );
+                    continue;
+                }
+
                 let mut backoff_ms = self.base_backoff_ms;
 
                 for attempt in 0..=self.max_retries {
@@ -570,6 +766,7 @@ impl Provider for ReliableProvider {
                         .await
                     {
                         Ok(resp) => {
+                            self.health.record_success(provider_name);
                             if attempt > 0 || *current_model != model {
                                 tracing::info!(
                                     provider = provider_name,
@@ -588,6 +785,9 @@ impl Provider for ReliableProvider {
                             let failure_reason = failure_reason(rate_limited, non_retryable);
                             let error_detail = compact_error_detail(&e);
 
+                            // Record failure in health tracker
+                            self.health.record_failure(provider_name, &error_detail);
+
                             push_failure(
                                 &mut failures,
                                 provider_name,
@@ -598,7 +798,64 @@ impl Provider for ReliableProvider {
                                 &error_detail,
                             );
 
-                            if rate_limited && !non_retryable_rate_limit {
+                            // Rate-limit: try alternative profiles of the same provider first
+                            if rate_limited && !non_retryable_rate_limit && attempt == 0 {
+                                // On first rate limit, check for alternative profiles
+                                let alt_profiles: Vec<_> =
+                                    self.find_alternative_profiles(provider_name).collect();
+
+                                if !alt_profiles.is_empty() {
+                                    tracing::info!(
+                                        provider = provider_name,
+                                        alternative_count = alt_profiles.len(),
+                                        error = %error_detail,
+                                        "Rate limited on first attempt; trying alternative profiles of same provider"
+                                    );
+
+                                    // Try each alternative profile
+                                    for (alt_name, alt_provider) in &alt_profiles {
+                                        match alt_provider
+                                            .chat_with_tools(
+                                                messages,
+                                                tools,
+                                                current_model,
+                                                temperature,
+                                            )
+                                            .await
+                                        {
+                                            Ok(resp) => {
+                                                self.health.record_success(alt_name);
+                                                tracing::info!(
+                                                    original_provider = provider_name,
+                                                    alternative_provider = alt_name,
+                                                    model = *current_model,
+                                                    "Profile rotation successful after rate limit"
+                                                );
+                                                return Ok(resp);
+                                            }
+                                            Err(alt_err) => {
+                                                // Record failure for alternative profile
+                                                let alt_error_detail =
+                                                    compact_error_detail(&alt_err);
+                                                self.health
+                                                    .record_failure(alt_name, &alt_error_detail);
+                                                tracing::debug!(
+                                                    alternative_provider = alt_name,
+                                                    error = %alt_error_detail,
+                                                    "Alternative profile also failed"
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    tracing::warn!(
+                                        provider = provider_name,
+                                        tried_alternatives = alt_profiles.len(),
+                                        "All alternative profiles failed; continuing with retry strategy"
+                                    );
+                                }
+
+                                // Fallback: try API key rotation (existing behavior)
                                 if let Some(new_key) = self.rotate_key() {
                                     tracing::warn!(
                                         provider = provider_name,
@@ -672,6 +929,17 @@ impl Provider for ReliableProvider {
 
         for current_model in &models {
             for (provider_name, provider) in &self.providers {
+                // Check circuit breaker
+                if let Err((remaining, state)) = self.health.should_try(provider_name) {
+                    tracing::warn!(
+                        provider = provider_name,
+                        remaining_secs = remaining.as_secs(),
+                        failure_count = state.failure_count,
+                        "Skipping provider - circuit breaker open"
+                    );
+                    continue;
+                }
+
                 let mut backoff_ms = self.base_backoff_ms;
 
                 for attempt in 0..=self.max_retries {
@@ -681,6 +949,19 @@ impl Provider for ReliableProvider {
                     };
                     match provider.chat(req, current_model, temperature).await {
                         Ok(resp) => {
+                            self.health.record_success(provider_name);
+
+                            // Log quota metadata if available (Phase 3)
+                            if let Some(quota) = &resp.quota_metadata {
+                                tracing::debug!(
+                                    provider = provider_name,
+                                    rate_limit_remaining = ?quota.rate_limit_remaining,
+                                    rate_limit_total = ?quota.rate_limit_total,
+                                    rate_limit_reset_at = ?quota.rate_limit_reset_at,
+                                    "Quota metadata extracted from API response"
+                                );
+                            }
+
                             if attempt > 0 || *current_model != model {
                                 tracing::info!(
                                     provider = provider_name,
@@ -699,6 +980,9 @@ impl Provider for ReliableProvider {
                             let failure_reason = failure_reason(rate_limited, non_retryable);
                             let error_detail = compact_error_detail(&e);
 
+                            // Record failure in health tracker
+                            self.health.record_failure(provider_name, &error_detail);
+
                             push_failure(
                                 &mut failures,
                                 provider_name,
@@ -709,7 +993,66 @@ impl Provider for ReliableProvider {
                                 &error_detail,
                             );
 
-                            if rate_limited && !non_retryable_rate_limit {
+                            // Rate-limit: try alternative profiles of the same provider first
+                            if rate_limited && !non_retryable_rate_limit && attempt == 0 {
+                                // On first rate limit, check for alternative profiles
+                                let alt_profiles: Vec<_> =
+                                    self.find_alternative_profiles(provider_name).collect();
+
+                                if !alt_profiles.is_empty() {
+                                    tracing::info!(
+                                        provider = provider_name,
+                                        alternative_count = alt_profiles.len(),
+                                        error = %error_detail,
+                                        "Rate limited on first attempt; trying alternative profiles of same provider"
+                                    );
+
+                                    // Try each alternative profile
+                                    for (alt_name, alt_provider) in &alt_profiles {
+                                        match alt_provider
+                                            .chat(
+                                                ChatRequest {
+                                                    messages: request.messages,
+                                                    tools: request.tools,
+                                                },
+                                                current_model,
+                                                temperature,
+                                            )
+                                            .await
+                                        {
+                                            Ok(resp) => {
+                                                self.health.record_success(alt_name);
+                                                tracing::info!(
+                                                    original_provider = provider_name,
+                                                    alternative_provider = alt_name,
+                                                    model = *current_model,
+                                                    "Profile rotation successful after rate limit"
+                                                );
+                                                return Ok(resp);
+                                            }
+                                            Err(alt_err) => {
+                                                // Record failure for alternative profile
+                                                let alt_error_detail =
+                                                    compact_error_detail(&alt_err);
+                                                self.health
+                                                    .record_failure(alt_name, &alt_error_detail);
+                                                tracing::debug!(
+                                                    alternative_provider = alt_name,
+                                                    error = %alt_error_detail,
+                                                    "Alternative profile also failed"
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    tracing::warn!(
+                                        provider = provider_name,
+                                        tried_alternatives = alt_profiles.len(),
+                                        "All alternative profiles failed; continuing with retry strategy"
+                                    );
+                                }
+
+                                // Fallback: try API key rotation (existing behavior)
                                 if let Some(new_key) = self.rotate_key() {
                                     tracing::warn!(
                                         provider = provider_name,
@@ -1671,6 +2014,7 @@ mod tests {
                 tool_calls: self.tool_calls.clone(),
                 usage: None,
                 reasoning_content: None,
+                quota_metadata: None,
             })
         }
     }
@@ -1864,6 +2208,7 @@ mod tests {
                 tool_calls: vec![],
                 usage: None,
                 reasoning_content: None,
+                quota_metadata: None,
             })
         }
     }
@@ -1979,5 +2324,239 @@ mod tests {
         // Primary should have been called only once (no retries)
         assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
         assert_eq!(fallback_calls.load(Ordering::SeqCst), 1);
+    }
+
+    // ── Profile rotation on rate limit ────────────────────────
+
+    #[tokio::test]
+    async fn profile_rotation_on_rate_limit_chat_with_system() {
+        let profile1_calls = Arc::new(AtomicUsize::new(0));
+        let profile2_calls = Arc::new(AtomicUsize::new(0));
+
+        let provider = ReliableProvider::new(
+            vec![
+                (
+                    "gemini:profile-1".into(),
+                    Box::new(MockProvider {
+                        calls: Arc::clone(&profile1_calls),
+                        fail_until_attempt: usize::MAX,
+                        response: "never",
+                        error: "429 Too Many Requests",
+                    }),
+                ),
+                (
+                    "gemini:profile-2".into(),
+                    Box::new(MockProvider {
+                        calls: Arc::clone(&profile2_calls),
+                        fail_until_attempt: 0,
+                        response: "rotated ok",
+                        error: "unused",
+                    }),
+                ),
+            ],
+            2,
+            1,
+        );
+
+        let result = provider
+            .simple_chat("hello", "test-model", 0.0)
+            .await
+            .unwrap();
+        assert_eq!(result, "rotated ok", "should have rotated to profile-2");
+        assert_eq!(
+            profile1_calls.load(Ordering::SeqCst),
+            1,
+            "profile-1 should be called once before rotation"
+        );
+        assert_eq!(
+            profile2_calls.load(Ordering::SeqCst),
+            1,
+            "profile-2 should be called once via rotation"
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_rotation_on_rate_limit_chat_with_history() {
+        let profile1_calls = Arc::new(AtomicUsize::new(0));
+        let profile2_calls = Arc::new(AtomicUsize::new(0));
+
+        let provider = ReliableProvider::new(
+            vec![
+                (
+                    "gemini:profile-1".into(),
+                    Box::new(MockProvider {
+                        calls: Arc::clone(&profile1_calls),
+                        fail_until_attempt: usize::MAX,
+                        response: "never",
+                        error: "429 Too Many Requests",
+                    }),
+                ),
+                (
+                    "gemini:profile-2".into(),
+                    Box::new(MockProvider {
+                        calls: Arc::clone(&profile2_calls),
+                        fail_until_attempt: 0,
+                        response: "history rotated",
+                        error: "unused",
+                    }),
+                ),
+            ],
+            2,
+            1,
+        );
+
+        let messages = vec![ChatMessage::user("hello")];
+        let result = provider
+            .chat_with_history(&messages, "test-model", 0.0)
+            .await
+            .unwrap();
+        assert_eq!(
+            result, "history rotated",
+            "should have rotated to profile-2"
+        );
+        assert_eq!(profile1_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(profile2_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn profile_rotation_on_rate_limit_chat() {
+        let profile1_calls = Arc::new(AtomicUsize::new(0));
+        let profile2_calls = Arc::new(AtomicUsize::new(0));
+
+        let provider = ReliableProvider::new(
+            vec![
+                (
+                    "gemini:profile-1".into(),
+                    Box::new(NativeToolMock {
+                        calls: Arc::clone(&profile1_calls),
+                        fail_until_attempt: usize::MAX,
+                        response_text: "never",
+                        tool_calls: vec![],
+                        error: "429 Too Many Requests",
+                    }) as Box<dyn Provider>,
+                ),
+                (
+                    "gemini:profile-2".into(),
+                    Box::new(NativeToolMock {
+                        calls: Arc::clone(&profile2_calls),
+                        fail_until_attempt: 0,
+                        response_text: "chat rotated",
+                        tool_calls: vec![],
+                        error: "unused",
+                    }) as Box<dyn Provider>,
+                ),
+            ],
+            2,
+            1,
+        );
+
+        let messages = vec![ChatMessage::user("hello")];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+        };
+        let result = provider.chat(request, "test-model", 0.0).await.unwrap();
+        assert_eq!(
+            result.text.as_deref(),
+            Some("chat rotated"),
+            "should have rotated to profile-2 via chat()"
+        );
+        assert_eq!(profile1_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(profile2_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn profile_rotation_skipped_for_non_retryable_rate_limit() {
+        let profile1_calls = Arc::new(AtomicUsize::new(0));
+        let profile2_calls = Arc::new(AtomicUsize::new(0));
+
+        // Both profiles fail with non-retryable rate limit — rotation should be skipped,
+        // and normal fallback should also fail since both have the same error.
+        let provider = ReliableProvider::new(
+            vec![
+                (
+                    "gemini:profile-1".into(),
+                    Box::new(MockProvider {
+                        calls: Arc::clone(&profile1_calls),
+                        fail_until_attempt: usize::MAX,
+                        response: "never",
+                        error: "API error (429 Too Many Requests): {\"code\":1113,\"message\":\"insufficient balance\"}",
+                    }),
+                ),
+                (
+                    "gemini:profile-2".into(),
+                    Box::new(MockProvider {
+                        calls: Arc::clone(&profile2_calls),
+                        fail_until_attempt: usize::MAX,
+                        response: "never",
+                        error: "API error (429 Too Many Requests): {\"code\":1113,\"message\":\"insufficient balance\"}",
+                    }),
+                ),
+            ],
+            2,
+            1,
+        );
+
+        let result = provider.simple_chat("hello", "test-model", 0.0).await;
+        assert!(
+            result.is_err(),
+            "non-retryable rate limit should fail without profile rotation"
+        );
+        // Both profiles should be called exactly once (non-retryable skips retries),
+        // but via normal fallback chain, not via profile rotation
+        assert_eq!(
+            profile1_calls.load(Ordering::SeqCst),
+            1,
+            "profile-1 called once (non-retryable, no retries)"
+        );
+        assert_eq!(
+            profile2_calls.load(Ordering::SeqCst),
+            1,
+            "profile-2 called once as normal fallback (not rotation)"
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_rotation_does_not_match_different_provider() {
+        let gemini_calls = Arc::new(AtomicUsize::new(0));
+        let openai_calls = Arc::new(AtomicUsize::new(0));
+
+        let provider = ReliableProvider::new(
+            vec![
+                (
+                    "gemini:profile-1".into(),
+                    Box::new(MockProvider {
+                        calls: Arc::clone(&gemini_calls),
+                        fail_until_attempt: usize::MAX,
+                        response: "never",
+                        error: "429 Too Many Requests",
+                    }),
+                ),
+                (
+                    // Different provider base — should NOT be picked for rotation
+                    "openai:profile-1".into(),
+                    Box::new(MockProvider {
+                        calls: Arc::clone(&openai_calls),
+                        fail_until_attempt: 0,
+                        response: "openai ok",
+                        error: "unused",
+                    }),
+                ),
+            ],
+            0, // no retries — only rotation + fallback
+            1,
+        );
+
+        let result = provider
+            .simple_chat("hello", "test-model", 0.0)
+            .await
+            .unwrap();
+        assert_eq!(
+            result, "openai ok",
+            "should fall back to openai as normal provider fallback, not profile rotation"
+        );
+        assert_eq!(gemini_calls.load(Ordering::SeqCst), 1);
+        // openai is reached as normal fallback, not via profile rotation
+        assert_eq!(openai_calls.load(Ordering::SeqCst), 1);
     }
 }

@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 pub struct OpenAiProvider {
     base_url: String,
     credential: Option<String>,
-    max_tokens_override: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -18,8 +17,6 @@ struct ChatRequest {
     model: String,
     messages: Vec<Message>,
     temperature: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,8 +58,6 @@ struct NativeChatRequest {
     model: String,
     messages: Vec<NativeMessage>,
     temperature: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<NativeToolSpec>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -169,26 +164,17 @@ impl NativeResponseMessage {
 
 impl OpenAiProvider {
     pub fn new(credential: Option<&str>) -> Self {
-        Self::with_base_url_and_max_tokens(None, credential, None)
+        Self::with_base_url(None, credential)
     }
 
     /// Create a provider with an optional custom base URL.
     /// Defaults to `https://api.openai.com/v1` when `base_url` is `None`.
     pub fn with_base_url(base_url: Option<&str>, credential: Option<&str>) -> Self {
-        Self::with_base_url_and_max_tokens(base_url, credential, None)
-    }
-
-    pub fn with_base_url_and_max_tokens(
-        base_url: Option<&str>,
-        credential: Option<&str>,
-        max_tokens_override: Option<u32>,
-    ) -> Self {
         Self {
             base_url: base_url
                 .map(|u| u.trim_end_matches('/').to_string())
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             credential: credential.map(ToString::to_string),
-            max_tokens_override: max_tokens_override.filter(|value| *value > 0),
         }
     }
 
@@ -301,6 +287,7 @@ impl OpenAiProvider {
             tool_calls,
             usage: None,
             reasoning_content,
+            quota_metadata: None,
         }
     }
 
@@ -340,7 +327,6 @@ impl Provider for OpenAiProvider {
             model: model.to_string(),
             messages,
             temperature,
-            max_tokens: self.max_tokens_override,
         };
 
         let response = self
@@ -380,7 +366,6 @@ impl Provider for OpenAiProvider {
             model: model.to_string(),
             messages: Self::convert_messages(request.messages),
             temperature,
-            max_tokens: self.max_tokens_override,
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
         };
@@ -397,6 +382,10 @@ impl Provider for OpenAiProvider {
             return Err(super::api_error("OpenAI", response).await);
         }
 
+        // Extract quota metadata from response headers before consuming body
+        let quota_extractor = super::UniversalQuotaExtractor::new();
+        let quota_metadata = quota_extractor.extract("openai", response.headers(), None);
+
         let native_response: NativeChatResponse = response.json().await?;
         let usage = native_response.usage.map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
@@ -410,6 +399,7 @@ impl Provider for OpenAiProvider {
             .ok_or_else(|| anyhow::anyhow!("No response from OpenAI"))?;
         let mut result = Self::parse_native_response(message);
         result.usage = usage;
+        result.quota_metadata = quota_metadata;
         Ok(result)
     }
 
@@ -444,7 +434,6 @@ impl Provider for OpenAiProvider {
             model: model.to_string(),
             messages: Self::convert_messages(messages),
             temperature,
-            max_tokens: self.max_tokens_override,
             tool_choice: native_tools.as_ref().map(|_| "auto".to_string()),
             tools: native_tools,
         };
@@ -461,6 +450,10 @@ impl Provider for OpenAiProvider {
             return Err(super::api_error("OpenAI", response).await);
         }
 
+        // Extract quota metadata from response headers before consuming body
+        let quota_extractor = super::UniversalQuotaExtractor::new();
+        let quota_metadata = quota_extractor.extract("openai", response.headers(), None);
+
         let native_response: NativeChatResponse = response.json().await?;
         let usage = native_response.usage.map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
@@ -474,6 +467,7 @@ impl Provider for OpenAiProvider {
             .ok_or_else(|| anyhow::anyhow!("No response from OpenAI"))?;
         let mut result = Self::parse_native_response(message);
         result.usage = usage;
+        result.quota_metadata = quota_metadata;
         Ok(result)
     }
 
@@ -544,7 +538,6 @@ mod tests {
                 },
             ],
             temperature: 0.7,
-            max_tokens: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"role\":\"system\""));
@@ -561,7 +554,6 @@ mod tests {
                 content: "hello".to_string(),
             }],
             temperature: 0.0,
-            max_tokens: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("system"));

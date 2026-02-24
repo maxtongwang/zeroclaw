@@ -23,8 +23,8 @@ use crate::providers::{self, ChatMessage, Provider};
 use crate::runtime;
 use crate::security::pairing::{constant_time_eq, is_public_bind, PairingGuard};
 use crate::security::SecurityPolicy;
+use crate::tools;
 use crate::tools::traits::ToolSpec;
-use crate::tools::{self, Tool};
 use crate::util::truncate_with_ellipsis;
 use anyhow::{Context, Result};
 use axum::{
@@ -313,12 +313,6 @@ pub struct AppState {
     pub observer: Arc<dyn crate::observability::Observer>,
     /// Registered tool specs (for web dashboard tools page)
     pub tools_registry: Arc<Vec<ToolSpec>>,
-    /// Executable tools for agent loop (web chat)
-    pub tools_registry_exec: Arc<Vec<Box<dyn Tool>>>,
-    /// Multimodal config for image handling in web chat
-    pub multimodal: crate::config::MultimodalConfig,
-    /// Max tool iterations for agent loop
-    pub max_tool_iterations: usize,
     /// Cost tracker (optional, for web dashboard cost page)
     pub cost_tracker: Option<Arc<CostTracker>>,
     /// SSE broadcast channel for real-time events
@@ -358,12 +352,9 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         &config.reliability,
         &providers::ProviderRuntimeOptions {
             auth_profile_override: None,
-            provider_api_url: config.api_url.clone(),
             zeroclaw_dir: config.config_path.parent().map(std::path::PathBuf::from),
             secrets_encrypt: config.secrets.encrypt,
             reasoning_enabled: config.runtime.reasoning_enabled,
-            custom_provider_api_mode: config.provider_api.map(|mode| mode.as_compatible_mode()),
-            max_tokens_override: None,
         },
     )?);
     let model = config
@@ -393,7 +384,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         (None, None)
     };
 
-    let tools_registry_exec: Arc<Vec<Box<dyn Tool>>> = Arc::new(tools::all_tools_with_runtime(
+    let tools_registry_raw = tools::all_tools_with_runtime(
         Arc::new(config.clone()),
         &security,
         runtime,
@@ -402,16 +393,13 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         composio_entity_id,
         &config.browser,
         &config.http_request,
-        &config.web_fetch,
         &config.workspace_dir,
         &config.agents,
         config.api_key.as_deref(),
         &config,
-    ));
+    );
     let tools_registry: Arc<Vec<ToolSpec>> =
-        Arc::new(tools_registry_exec.iter().map(|t| t.spec()).collect());
-    let max_tool_iterations = config.agent.max_tool_iterations;
-    let multimodal_config = config.multimodal.clone();
+        Arc::new(tools_registry_raw.iter().map(|t| t.spec()).collect());
 
     // Cost tracker (optional)
     let cost_tracker = if config.cost.enabled {
@@ -682,9 +670,6 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         qq_webhook_enabled,
         observer: broadcast_observer,
         tools_registry,
-        tools_registry_exec,
-        multimodal: multimodal_config,
-        max_tool_iterations,
         cost_tracker,
         event_tx,
     };
@@ -716,10 +701,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/api/cron", post(api::handle_api_cron_add))
         .route("/api/cron/{id}", delete(api::handle_api_cron_delete))
         .route("/api/integrations", get(api::handle_api_integrations))
-        .route(
-            "/api/doctor",
-            get(api::handle_api_doctor).post(api::handle_api_doctor),
-        )
+        .route("/api/doctor", post(api::handle_api_doctor))
         .route("/api/memory", get(api::handle_api_memory_list))
         .route("/api/memory", post(api::handle_api_memory_store))
         .route("/api/memory/{key}", delete(api::handle_api_memory_delete))
@@ -763,7 +745,6 @@ async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
     let body = serde_json::json!({
         "status": "ok",
         "paired": state.pairing.is_paired(),
-        "require_pairing": state.pairing.require_pairing(),
         "runtime": crate::health::snapshot_json(),
     });
     Json(body)
@@ -1551,6 +1532,12 @@ async fn handle_linq_webhook(
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct WatiVerifyQuery {
+    #[serde(rename = "hub.challenge")]
+    pub challenge: Option<String>,
+}
+
 /// GET /wati — WATI webhook verification (echoes hub.challenge)
 async fn handle_wati_verify(
     State(state): State<AppState>,
@@ -1567,12 +1554,6 @@ async fn handle_wati_verify(
     }
 
     (StatusCode::BAD_REQUEST, "Missing hub.challenge".to_string())
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct WatiVerifyQuery {
-    #[serde(rename = "hub.challenge")]
-    pub challenge: Option<String>,
 }
 
 /// POST /wati — incoming WATI WhatsApp message webhook
@@ -1934,9 +1915,6 @@ mod tests {
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
-            tools_registry_exec: Arc::new(Vec::new()),
-            multimodal: crate::config::MultimodalConfig::default(),
-            max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
@@ -1981,16 +1959,11 @@ mod tests {
             whatsapp_app_secret: None,
             linq: None,
             linq_signing_secret: None,
+            wati: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
-            wati: None,
-            qq: None,
-            qq_webhook_enabled: false,
             observer,
             tools_registry: Arc::new(Vec::new()),
-            tools_registry_exec: Arc::new(Vec::new()),
-            multimodal: crate::config::MultimodalConfig::default(),
-            max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
@@ -2375,9 +2348,6 @@ mod tests {
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
-            tools_registry_exec: Arc::new(Vec::new()),
-            multimodal: crate::config::MultimodalConfig::default(),
-            max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
@@ -2554,9 +2524,6 @@ mod tests {
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
-            tools_registry_exec: Arc::new(Vec::new()),
-            multimodal: crate::config::MultimodalConfig::default(),
-            max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
@@ -2635,9 +2602,6 @@ mod tests {
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
-            tools_registry_exec: Arc::new(Vec::new()),
-            multimodal: crate::config::MultimodalConfig::default(),
-            max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
@@ -2688,9 +2652,6 @@ mod tests {
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
-            tools_registry_exec: Arc::new(Vec::new()),
-            multimodal: crate::config::MultimodalConfig::default(),
-            max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
@@ -2746,9 +2707,6 @@ mod tests {
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
-            tools_registry_exec: Arc::new(Vec::new()),
-            multimodal: crate::config::MultimodalConfig::default(),
-            max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
@@ -2809,9 +2767,6 @@ mod tests {
             qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
-            tools_registry_exec: Arc::new(Vec::new()),
-            multimodal: crate::config::MultimodalConfig::default(),
-            max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };
@@ -2861,16 +2816,11 @@ mod tests {
             whatsapp_app_secret: None,
             linq: None,
             linq_signing_secret: None,
+            wati: None,
             nextcloud_talk: Some(channel),
             nextcloud_talk_webhook_secret: Some(Arc::from(secret)),
-            wati: None,
-            qq: None,
-            qq_webhook_enabled: false,
             observer: Arc::new(crate::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
-            tools_registry_exec: Arc::new(Vec::new()),
-            multimodal: crate::config::MultimodalConfig::default(),
-            max_tool_iterations: 10,
             cost_tracker: None,
             event_tx: tokio::sync::broadcast::channel(16).0,
         };

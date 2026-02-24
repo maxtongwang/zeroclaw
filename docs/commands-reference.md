@@ -116,16 +116,22 @@ Notes:
 
 `models refresh` currently supports live catalog refresh for provider IDs: `openrouter`, `openai`, `anthropic`, `groq`, `mistral`, `deepseek`, `xai`, `together-ai`, `gemini`, `ollama`, `llamacpp`, `sglang`, `vllm`, `astrai`, `venice`, `fireworks`, `cohere`, `moonshot`, `glm`, `zai`, `qwen`, and `nvidia`.
 
+#### Live model availability test
+
+```bash
+./dev/test_models.sh              # test all Gemini models + profile rotation
+./dev/test_models.sh models       # test model availability only
+./dev/test_models.sh profiles     # test profile rotation only
+```
+
+Runs a Rust integration test (`tests/gemini_model_availability.rs`) that verifies each model against the OAuth endpoint (cloudcode-pa). Requires valid Gemini OAuth credentials in `auth-profiles.json`.
+
 ### `doctor`
 
 - `zeroclaw doctor`
 - `zeroclaw doctor models [--provider <ID>] [--use-cache]`
 - `zeroclaw doctor traces [--limit <N>] [--event <TYPE>] [--contains <TEXT>]`
 - `zeroclaw doctor traces --id <TRACE_ID>`
-
-Provider connectivity matrix CI/local helper:
-
-- `python3 scripts/ci/provider_connectivity_matrix.py --binary target/release-fast/zeroclaw --contract .github/connectivity/probe-contract.json`
 
 `doctor traces` reads runtime tool/model diagnostics from `observability.runtime_trace_path`.
 
@@ -144,7 +150,6 @@ Runtime in-chat commands (Telegram/Discord while channel server is running):
 - `/models <provider>`
 - `/model`
 - `/model <model-id>`
-- `/new`
 
 Channel runtime also watches `config.toml` and hot-applies updates to:
 - `default_provider`

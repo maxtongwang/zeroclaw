@@ -7,6 +7,9 @@ use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 mod audit;
+mod tool_handler;
+
+pub use tool_handler::SkillToolHandler;
 
 const OPEN_SKILLS_REPO_URL: &str = "https://github.com/besoeasy/open-skills";
 const OPEN_SKILLS_SYNC_MARKER: &str = ".zeroclaw-open-skills-sync";
@@ -238,7 +241,7 @@ fn open_skills_enabled_from_sources(
     env_override: Option<&str>,
 ) -> bool {
     if let Some(raw) = env_override {
-        if let Some(enabled) = parse_open_skills_enabled(&raw) {
+        if let Some(enabled) = parse_open_skills_enabled(raw) {
             return enabled;
         }
         if !raw.trim().is_empty() {
@@ -591,6 +594,39 @@ pub fn skills_to_prompt_with_mode(
 /// Get the skills directory path
 pub fn skills_dir(workspace_dir: &Path) -> PathBuf {
     workspace_dir.join("skills")
+}
+
+/// Create tool handlers for all skill tools
+pub fn create_skill_tools(
+    skills: &[Skill],
+    security: std::sync::Arc<crate::security::SecurityPolicy>,
+) -> Vec<Box<dyn crate::tools::Tool>> {
+    let mut tools: Vec<Box<dyn crate::tools::Tool>> = Vec::new();
+
+    for skill in skills {
+        for tool_def in &skill.tools {
+            match SkillToolHandler::new(skill.name.clone(), tool_def.clone(), security.clone()) {
+                Ok(handler) => {
+                    tracing::debug!(
+                        skill = %skill.name,
+                        tool = %tool_def.name,
+                        "Registered skill tool"
+                    );
+                    tools.push(Box::new(handler));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        skill = %skill.name,
+                        tool = %tool_def.name,
+                        error = %e,
+                        "Failed to create skill tool handler"
+                    );
+                }
+            }
+        }
+    }
+
+    tools
 }
 
 /// Initialize the skills directory with a README

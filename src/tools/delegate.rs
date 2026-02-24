@@ -411,6 +411,7 @@ impl DelegateTool {
                 None,
                 None,
                 &[],
+                None, // Phase 5: delegate tool doesn't need quota awareness
             ),
         )
         .await;
@@ -602,6 +603,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     usage: None,
                     reasoning_content: None,
+                    quota_metadata: None,
                 })
             } else {
                 Ok(ChatResponse {
@@ -613,6 +615,7 @@ mod tests {
                     }],
                     usage: None,
                     reasoning_content: None,
+                    quota_metadata: None,
                 })
             }
         }
@@ -647,6 +650,7 @@ mod tests {
                 }],
                 usage: None,
                 reasoning_content: None,
+                quota_metadata: None,
             })
         }
     }

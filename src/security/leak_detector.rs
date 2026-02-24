@@ -113,7 +113,7 @@ impl LeakDetector {
                 ),
                 // Generic
                 (
-                    Regex::new(r#"api[_-]?key[=:]\s*['"]*[a-zA-Z0-9_-]{20,}"#).unwrap(),
+                    Regex::new(r#"api[_-]?key[=:]\s*['"]* [a-zA-Z0-9_-]{20,}"#).unwrap(),
                     "Generic API key",
                 ),
             ]
@@ -145,7 +145,7 @@ impl LeakDetector {
                 ),
                 (
                     Regex::new(
-                        r#"aws[_-]?secret[_-]?access[_-]?key[=:]\s*['"]*[a-zA-Z0-9/+=]{40}"#,
+                        r#"aws[_-]?secret[_-]?access[_-]?key[=:]\s*['"]* [a-zA-Z0-9/+=]{40}"#,
                     )
                     .unwrap(),
                     "AWS Secret Access Key",
@@ -174,15 +174,15 @@ impl LeakDetector {
         let regexes = SECRET_PATTERNS.get_or_init(|| {
             vec![
                 (
-                    Regex::new(r#"(?i)password[=:]\s*['"]*[^\s'"]{8,}"#).unwrap(),
+                    Regex::new(r#"(?i)password[=:]\s*['"]* [^\s'"]{8,}"#).unwrap(),
                     "Password in config",
                 ),
                 (
-                    Regex::new(r#"(?i)secret[=:]\s*['"]*[a-zA-Z0-9_-]{16,}"#).unwrap(),
+                    Regex::new(r#"(?i)secret[=:]\s*['"]* [a-zA-Z0-9_-]{16,}"#).unwrap(),
                     "Secret value",
                 ),
                 (
-                    Regex::new(r#"(?i)token[=:]\s*['"]*[a-zA-Z0-9_.-]{20,}"#).unwrap(),
+                    Regex::new(r#"(?i)token[=:]\s*['"]* [a-zA-Z0-9_.-]{20,}"#).unwrap(),
                     "Token value",
                 ),
             ]
@@ -311,7 +311,7 @@ mod tests {
                 assert!(patterns.iter().any(|p| p.contains("Stripe")));
                 assert!(redacted.contains("[REDACTED"));
             }
-            _ => panic!("Should detect Stripe key"),
+            LeakResult::Clean => panic!("Should detect Stripe key"),
         }
     }
 
@@ -324,7 +324,7 @@ mod tests {
             LeakResult::Detected { patterns, .. } => {
                 assert!(patterns.iter().any(|p| p.contains("AWS")));
             }
-            _ => panic!("Should detect AWS key"),
+            LeakResult::Clean => panic!("Should detect AWS key"),
         }
     }
 
@@ -342,7 +342,7 @@ MIIEowIBAAKCAQEA0ZPr5JeyVDonXsKhfq...
                 assert!(patterns.iter().any(|p| p.contains("private key")));
                 assert!(redacted.contains("[REDACTED_PRIVATE_KEY]"));
             }
-            _ => panic!("Should detect private key"),
+            LeakResult::Clean => panic!("Should detect private key"),
         }
     }
 
@@ -356,7 +356,7 @@ MIIEowIBAAKCAQEA0ZPr5JeyVDonXsKhfq...
                 assert!(patterns.iter().any(|p| p.contains("JWT")));
                 assert!(redacted.contains("[REDACTED_JWT]"));
             }
-            _ => panic!("Should detect JWT"),
+            LeakResult::Clean => panic!("Should detect JWT"),
         }
     }
 
@@ -369,7 +369,7 @@ MIIEowIBAAKCAQEA0ZPr5JeyVDonXsKhfq...
             LeakResult::Detected { patterns, .. } => {
                 assert!(patterns.iter().any(|p| p.contains("PostgreSQL")));
             }
-            _ => panic!("Should detect database URL"),
+            LeakResult::Clean => panic!("Should detect database URL"),
         }
     }
 

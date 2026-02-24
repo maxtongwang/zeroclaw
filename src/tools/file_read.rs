@@ -462,7 +462,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_read_outside_workspace_allowed_when_workspace_only_disabled() {
+    async fn file_read_outside_workspace_guides_allowed_roots() {
         let root = std::env::temp_dir().join("zeroclaw_test_file_read_allowed_roots_hint");
         let workspace = root.join("workspace");
         let outside = root.join("outside");
@@ -487,9 +487,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.success);
-        assert!(result.error.is_none());
-        assert!(result.output.contains("outside"));
+        assert!(!result.success);
+        let error = result.error.unwrap_or_default();
+        assert!(error.contains("escapes workspace"));
+        assert!(error.contains("allowed_roots"));
 
         let _ = tokio::fs::remove_dir_all(&root).await;
     }
@@ -744,6 +745,7 @@ mod tests {
                         tool_calls: vec![],
                         usage: None,
                         reasoning_content: None,
+                        quota_metadata: None,
                     });
                 }
                 Ok(guard.remove(0))
@@ -804,6 +806,7 @@ mod tests {
                 }],
                 usage: None,
                 reasoning_content: None,
+                quota_metadata: None,
             },
             // Turn 1 continued: provider sees tool result and answers
             ChatResponse {
@@ -811,6 +814,7 @@ mod tests {
                 tool_calls: vec![],
                 usage: None,
                 reasoning_content: None,
+                quota_metadata: None,
             },
         ]);
 
@@ -897,12 +901,14 @@ mod tests {
                 }],
                 usage: None,
                 reasoning_content: None,
+                quota_metadata: None,
             },
             ChatResponse {
                 text: Some("The file appears to be binary data.".into()),
                 tool_calls: vec![],
                 usage: None,
                 reasoning_content: None,
+                quota_metadata: None,
             },
         ]);
 
@@ -986,8 +992,7 @@ mod tests {
         let file_read_tool: Box<dyn Tool> = Box::new(FileReadTool::new(security));
 
         // ── Real provider (OpenAI Codex uses XML tool dispatch) ──
-        let provider = OpenAiCodexProvider::new(&ProviderRuntimeOptions::default(), None)
-            .expect("provider should initialize");
+        let provider = OpenAiCodexProvider::new(&ProviderRuntimeOptions::default());
 
         let mut agent = Agent::builder()
             .provider(Box::new(provider) as Box<dyn Provider>)

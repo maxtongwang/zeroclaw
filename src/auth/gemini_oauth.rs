@@ -14,6 +14,7 @@ use chrono::Utc;
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -253,6 +254,14 @@ pub async fn start_device_code_flow(client: &Client) -> Result<DeviceCodeStart> 
         .context("Failed to read device code response")?;
 
     if !status.is_success() {
+        // Detect Cloudflare blocks specifically
+        if status == 403 && (body.contains("Cloudflare") || body.contains("challenge-platform")) {
+            anyhow::bail!(
+                "Device-code endpoint is protected by Cloudflare (403 Forbidden). \
+                This is expected for server environments. Use browser flow instead."
+            );
+        }
+
         if let Ok(err) = serde_json::from_str::<OAuthErrorResponse>(&body) {
             anyhow::bail!(
                 "Google device code error: {} - {}",
@@ -485,7 +494,24 @@ pub fn parse_code_from_redirect(input: &str, expected_state: Option<&str>) -> Re
         if let Some(expected) = expected_state {
             if let Some(actual) = params.get("state") {
                 if actual != expected {
-                    anyhow::bail!("OAuth state mismatch: expected {expected}, got {actual}");
+                    let mut err_msg = format!(
+                        "OAuth state mismatch: expected {}, got {}",
+                        expected, actual
+                    );
+
+                    // Add helpful hint if truncation detected
+                    if let Some(hint) =
+                        crate::auth::oauth_common::detect_url_truncation(input, expected.len())
+                    {
+                        let _ = write!(err_msg,
+                            "\n\n💡 Tip: {}\n   \
+                            Try copying ONLY the authorization code instead of the full URL.\n   \
+                            The code looks like: 4/0AfrIep...",
+                            hint
+                        );
+                    }
+
+                    anyhow::bail!(err_msg);
                 }
             }
         }
@@ -524,29 +550,6 @@ pub fn extract_account_email_from_id_token(id_token: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    struct EnvVarRestore {
-        key: &'static str,
-        original: Option<String>,
-    }
-
-    impl EnvVarRestore {
-        fn set(key: &'static str, value: &str) -> Self {
-            let original = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self { key, original }
-        }
-    }
-
-    impl Drop for EnvVarRestore {
-        fn drop(&mut self) {
-            if let Some(ref original) = self.original {
-                std::env::set_var(self.key, original);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-
     #[test]
     fn pkce_generates_valid_state() {
         let pkce = generate_pkce_state();
@@ -557,10 +560,9 @@ mod tests {
 
     #[test]
     fn authorize_url_contains_required_params() {
-        // Isolate environment changes so this test cannot leak into other test modules.
-        let _client_id_guard = EnvVarRestore::set("GEMINI_OAUTH_CLIENT_ID", "test-client-id");
-        let _client_secret_guard =
-            EnvVarRestore::set("GEMINI_OAUTH_CLIENT_SECRET", "test-client-secret");
+        // Set test credentials
+        std::env::set_var("GEMINI_OAUTH_CLIENT_ID", "test-client-id");
+        std::env::set_var("GEMINI_OAUTH_CLIENT_SECRET", "test-client-secret");
 
         let pkce = generate_pkce_state();
         let url = build_authorize_url(&pkce).expect("Failed to build authorize URL");

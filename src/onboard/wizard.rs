@@ -5,8 +5,9 @@ use crate::config::schema::{
 };
 use crate::config::{
     AutonomyConfig, BrowserConfig, ChannelsConfig, ComposioConfig, Config, DiscordConfig,
-    HeartbeatConfig, IMessageConfig, LarkConfig, MatrixConfig, MemoryConfig, ObservabilityConfig,
-    RuntimeConfig, SecretsConfig, SlackConfig, StorageConfig, TelegramConfig, WebhookConfig,
+    FeishuConfig, HeartbeatConfig, IMessageConfig, LarkConfig, MatrixConfig, MemoryConfig,
+    ObservabilityConfig, RuntimeConfig, SecretsConfig, SlackConfig, StorageConfig, TelegramConfig,
+    WebhookConfig,
 };
 use crate::hardware::{self, HardwareConfig};
 use crate::memory::{
@@ -22,7 +23,7 @@ use console::style;
 use dialoguer::{Confirm, Input, Select};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -134,14 +135,13 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         },
         api_url: provider_api_url,
         default_provider: Some(provider),
-        provider_api: None,
         default_model: Some(model),
-        model_providers: std::collections::HashMap::new(),
         default_temperature: 0.7,
         observability: ObservabilityConfig::default(),
         autonomy: AutonomyConfig::default(),
         security: crate::config::SecurityConfig::default(),
         runtime: RuntimeConfig::default(),
+        research: crate::config::ResearchPhaseConfig::default(),
         reliability: crate::config::ReliabilityConfig::default(),
         scheduler: crate::config::schema::SchedulerConfig::default(),
         agent: crate::config::schema::AgentConfig::default(),
@@ -160,7 +160,6 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         browser: BrowserConfig::default(),
         http_request: crate::config::HttpRequestConfig::default(),
         multimodal: crate::config::MultimodalConfig::default(),
-        web_fetch: crate::config::WebFetchConfig::default(),
         web_search: crate::config::WebSearchConfig::default(),
         proxy: crate::config::ProxyConfig::default(),
         identity: crate::config::IdentityConfig::default(),
@@ -390,7 +389,6 @@ fn memory_config_defaults_for_backend(backend: &str) -> MemoryConfig {
         snapshot_on_hygiene: false,
         auto_hydrate: true,
         sqlite_open_timeout_secs: None,
-        qdrant: crate::config::QdrantConfig::default(),
     }
 }
 
@@ -486,14 +484,13 @@ async fn run_quick_setup_with_home(
         }),
         api_url: None,
         default_provider: Some(provider_name.clone()),
-        provider_api: None,
         default_model: Some(model.clone()),
-        model_providers: std::collections::HashMap::new(),
         default_temperature: 0.7,
         observability: ObservabilityConfig::default(),
         autonomy: AutonomyConfig::default(),
         security: crate::config::SecurityConfig::default(),
         runtime: RuntimeConfig::default(),
+        research: crate::config::ResearchPhaseConfig::default(),
         reliability: crate::config::ReliabilityConfig::default(),
         scheduler: crate::config::schema::SchedulerConfig::default(),
         agent: crate::config::schema::AgentConfig::default(),
@@ -512,7 +509,6 @@ async fn run_quick_setup_with_home(
         browser: BrowserConfig::default(),
         http_request: crate::config::HttpRequestConfig::default(),
         multimodal: crate::config::MultimodalConfig::default(),
-        web_fetch: crate::config::WebFetchConfig::default(),
         web_search: crate::config::WebSearchConfig::default(),
         proxy: crate::config::ProxyConfig::default(),
         identity: crate::config::IdentityConfig::default(),
@@ -607,32 +603,10 @@ async fn run_quick_setup_with_home(
     println!();
     println!("  {}", style("Next steps:").white().bold());
     if credential_override.is_none() {
-        if provider_supports_keyless_local_usage(&provider_name) {
-            println!("    1. Chat:     zeroclaw agent -m \"Hello!\"");
-            println!("    2. Gateway:  zeroclaw gateway");
-            println!("    3. Status:   zeroclaw status");
-        } else if provider_supports_device_flow(&provider_name) {
-            if canonical_provider_name(&provider_name) == "copilot" {
-                println!("    1. Chat:              zeroclaw agent -m \"Hello!\"");
-                println!("       (device / OAuth auth will prompt on first run)");
-                println!("    2. Gateway:           zeroclaw gateway");
-                println!("    3. Status:            zeroclaw status");
-            } else {
-                println!(
-                    "    1. Login:             zeroclaw auth login --provider {}",
-                    provider_name
-                );
-                println!("    2. Chat:              zeroclaw agent -m \"Hello!\"");
-                println!("    3. Gateway:           zeroclaw gateway");
-                println!("    4. Status:            zeroclaw status");
-            }
-        } else {
-            let env_var = provider_env_var(&provider_name);
-            println!("    1. Set your API key:  export {env_var}=\"sk-...\"");
-            println!("    2. Or edit:           ~/.zeroclaw/config.toml");
-            println!("    3. Chat:              zeroclaw agent -m \"Hello!\"");
-            println!("    4. Gateway:           zeroclaw gateway");
-        }
+        println!("    1. Set your API key:  export OPENROUTER_API_KEY=\"sk-...\"");
+        println!("    2. Or edit:           ~/.zeroclaw/config.toml");
+        println!("    3. Chat:              zeroclaw agent -m \"Hello!\"");
+        println!("    4. Gateway:           zeroclaw gateway");
     } else {
         println!("    1. Chat:     zeroclaw agent -m \"Hello!\"");
         println!("    2. Gateway:  zeroclaw gateway");
@@ -656,8 +630,6 @@ fn canonical_provider_name(provider_name: &str) -> &str {
         "grok" => "xai",
         "together" => "together-ai",
         "google" | "google-gemini" => "gemini",
-        "github-copilot" => "copilot",
-        "openai_codex" | "codex" => "openai-codex",
         "kimi_coding" | "kimi_for_coding" => "kimi-code",
         "nvidia-nim" | "build.nvidia.com" => "nvidia",
         "aws-bedrock" => "bedrock",
@@ -1112,8 +1084,16 @@ fn curated_models_for_provider(provider_name: &str) -> Vec<(String, String)> {
         ],
         "gemini" => vec![
             (
+                "gemini-3.1-pro-preview".to_string(),
+                "Gemini 3.1 Pro Preview (API-key only, not available via OAuth)".to_string(),
+            ),
+            (
                 "gemini-3-pro-preview".to_string(),
                 "Gemini 3 Pro Preview (latest frontier reasoning)".to_string(),
+            ),
+            (
+                "gemini-3-flash-preview".to_string(),
+                "Gemini 3 Flash Preview (fast + powerful)".to_string(),
             ),
             (
                 "gemini-2.5-pro".to_string(),
@@ -1133,14 +1113,9 @@ fn curated_models_for_provider(provider_name: &str) -> Vec<(String, String)> {
 }
 
 fn supports_live_model_fetch(provider_name: &str) -> bool {
-    if provider_name.trim().starts_with("custom:") {
-        return true;
-    }
-
     matches!(
         canonical_provider_name(provider_name),
         "openrouter"
-            | "openai-codex"
             | "openai"
             | "anthropic"
             | "groq"
@@ -1175,7 +1150,6 @@ fn models_endpoint_for_provider(provider_name: &str) -> Option<&'static str> {
         "glm-cn" | "bigmodel" => Some("https://open.bigmodel.cn/api/paas/v4/models"),
         "zai-cn" | "z.ai-cn" => Some("https://open.bigmodel.cn/api/coding/paas/v4/models"),
         _ => match canonical_provider_name(provider_name) {
-            "openai-codex" => Some("https://api.openai.com/v1/models"),
             "openai" => Some("https://api.openai.com/v1/models"),
             "venice" => Some("https://api.venice.ai/api/v1/models"),
             "groq" => Some("https://api.groq.com/openai/v1/models"),
@@ -1210,16 +1184,14 @@ fn build_model_fetch_client() -> Result<reqwest::blocking::Client> {
 }
 
 fn normalize_model_ids(ids: Vec<String>) -> Vec<String> {
-    let mut unique = BTreeMap::new();
+    let mut unique = BTreeSet::new();
     for id in ids {
         let trimmed = id.trim();
         if !trimmed.is_empty() {
-            unique
-                .entry(trimmed.to_ascii_lowercase())
-                .or_insert_with(|| trimmed.to_string());
+            unique.insert(trimmed.to_string());
         }
     }
-    unique.into_values().collect()
+    unique.into_iter().collect()
 }
 
 fn parse_openai_compatible_model_ids(payload: &Value) -> Vec<String> {
@@ -1428,34 +1400,10 @@ fn resolve_live_models_endpoint(
     provider_name: &str,
     provider_api_url: Option<&str>,
 ) -> Option<String> {
-    if let Some(raw_base) = provider_name.strip_prefix("custom:") {
-        let normalized = raw_base.trim().trim_end_matches('/');
-        if normalized.is_empty() {
-            return None;
-        }
-        if normalized.ends_with("/models") {
-            return Some(normalized.to_string());
-        }
-        return Some(format!("{normalized}/models"));
-    }
-
     if matches!(
         canonical_provider_name(provider_name),
         "llamacpp" | "sglang" | "vllm" | "osaurus"
     ) {
-        if let Some(url) = provider_api_url
-            .map(str::trim)
-            .filter(|url| !url.is_empty())
-        {
-            let normalized = url.trim_end_matches('/');
-            if normalized.ends_with("/models") {
-                return Some(normalized.to_string());
-            }
-            return Some(format!("{normalized}/models"));
-        }
-    }
-
-    if canonical_provider_name(provider_name) == "openai-codex" {
         if let Some(url) = provider_api_url
             .map(str::trim)
             .filter(|url| !url.is_empty())
@@ -1812,151 +1760,6 @@ pub async fn run_models_refresh(
     }
 }
 
-pub async fn run_models_list(config: &Config, provider_override: Option<&str>) -> Result<()> {
-    let provider_name = provider_override
-        .or(config.default_provider.as_deref())
-        .unwrap_or("openrouter");
-
-    let cached = load_any_cached_models_for_provider(&config.workspace_dir, provider_name).await?;
-
-    let Some(cached) = cached else {
-        println!();
-        println!(
-            "  No cached models for '{provider_name}'. Run: zeroclaw models refresh --provider {provider_name}"
-        );
-        println!();
-        return Ok(());
-    };
-
-    println!();
-    println!(
-        "  {} models for '{}' (cached {} ago):",
-        cached.models.len(),
-        provider_name,
-        humanize_age(cached.age_secs)
-    );
-    println!();
-    for model in &cached.models {
-        let marker = if config.default_model.as_deref() == Some(model.as_str()) {
-            "* "
-        } else {
-            "  "
-        };
-        println!("  {marker}{model}");
-    }
-    println!();
-    Ok(())
-}
-
-pub async fn run_models_set(config: &Config, model: &str) -> Result<()> {
-    let model = model.trim();
-    if model.is_empty() {
-        anyhow::bail!("Model name cannot be empty");
-    }
-
-    let mut updated = config.clone();
-    updated.default_model = Some(model.to_string());
-    updated.save().await?;
-
-    println!();
-    println!("  Default model set to '{}'.", style(model).green().bold());
-    println!();
-    Ok(())
-}
-
-pub async fn run_models_status(config: &Config) -> Result<()> {
-    let provider = config.default_provider.as_deref().unwrap_or("openrouter");
-    let model = config.default_model.as_deref().unwrap_or("(not set)");
-
-    println!();
-    println!("  Provider:  {}", style(provider).cyan());
-    println!("  Model:     {}", style(model).cyan());
-    println!(
-        "  Temp:      {}",
-        style(format!("{:.1}", config.default_temperature)).cyan()
-    );
-
-    match load_any_cached_models_for_provider(&config.workspace_dir, provider).await? {
-        Some(cached) => {
-            println!(
-                "  Cache:     {} models (updated {} ago)",
-                cached.models.len(),
-                humanize_age(cached.age_secs)
-            );
-            let fresh = cached.age_secs < MODEL_CACHE_TTL_SECS;
-            if fresh {
-                println!("  Freshness: {}", style("fresh").green());
-            } else {
-                println!("  Freshness: {}", style("stale").yellow());
-            }
-        }
-        None => {
-            println!("  Cache:     {}", style("none").yellow());
-        }
-    }
-
-    println!();
-    Ok(())
-}
-
-pub async fn cached_model_catalog_stats(
-    config: &Config,
-    provider_name: &str,
-) -> Result<Option<(usize, u64)>> {
-    let Some(cached) =
-        load_any_cached_models_for_provider(&config.workspace_dir, provider_name).await?
-    else {
-        return Ok(None);
-    };
-    Ok(Some((cached.models.len(), cached.age_secs)))
-}
-
-pub async fn run_models_refresh_all(config: &Config, force: bool) -> Result<()> {
-    let mut targets: Vec<String> = crate::providers::list_providers()
-        .into_iter()
-        .map(|provider| provider.name.to_string())
-        .filter(|name| supports_live_model_fetch(name))
-        .collect();
-
-    targets.sort();
-    targets.dedup();
-
-    if targets.is_empty() {
-        anyhow::bail!("No providers support live model discovery");
-    }
-
-    println!(
-        "Refreshing model catalogs for {} providers (force: {})",
-        targets.len(),
-        if force { "yes" } else { "no" }
-    );
-    println!();
-
-    let mut ok_count = 0usize;
-    let mut fail_count = 0usize;
-
-    for provider_name in &targets {
-        println!("== {} ==", provider_name);
-        match run_models_refresh(config, Some(provider_name), force).await {
-            Ok(()) => {
-                ok_count += 1;
-            }
-            Err(error) => {
-                fail_count += 1;
-                println!("  failed: {error}");
-            }
-        }
-        println!();
-    }
-
-    println!("Summary: {} succeeded, {} failed", ok_count, fail_count);
-
-    if ok_count == 0 {
-        anyhow::bail!("Model refresh failed for all providers")
-    }
-    Ok(())
-}
-
 // ── Step helpers ─────────────────────────────────────────────────
 
 fn print_step(current: u8, total: u8, title: &str) {
@@ -2008,7 +1811,7 @@ fn resolve_interactive_onboarding_mode(
             "  Existing config found at {}. Select setup mode",
             config_path.display()
         ))
-        .items(&options)
+        .items(options)
         .default(1)
         .interact()?;
 
@@ -2856,7 +2659,6 @@ fn provider_env_var(name: &str) -> &'static str {
     match canonical_provider_name(name) {
         "openrouter" => "OPENROUTER_API_KEY",
         "anthropic" => "ANTHROPIC_API_KEY",
-        "openai-codex" => "OPENAI_API_KEY",
         "openai" => "OPENAI_API_KEY",
         "ollama" => "OLLAMA_API_KEY",
         "llamacpp" => "LLAMACPP_API_KEY",
@@ -2896,13 +2698,6 @@ fn provider_supports_keyless_local_usage(provider_name: &str) -> bool {
     matches!(
         canonical_provider_name(provider_name),
         "ollama" | "llamacpp" | "sglang" | "vllm" | "osaurus"
-    )
-}
-
-fn provider_supports_device_flow(provider_name: &str) -> bool {
-    matches!(
-        canonical_provider_name(provider_name),
-        "copilot" | "gemini" | "openai-codex"
     )
 }
 
@@ -4948,17 +4743,28 @@ fn setup_channels() -> Result<ChannelsConfig> {
                     );
                 }
 
-                config.lark = Some(LarkConfig {
-                    app_id,
-                    app_secret,
-                    verification_token,
-                    encrypt_key: None,
-                    allowed_users,
-                    mention_only: false,
-                    use_feishu: is_feishu,
-                    receive_mode,
-                    port,
-                });
+                if is_feishu {
+                    config.feishu = Some(FeishuConfig {
+                        app_id,
+                        app_secret,
+                        verification_token,
+                        encrypt_key: None,
+                        allowed_users,
+                        receive_mode,
+                        port,
+                    });
+                } else {
+                    config.lark = Some(LarkConfig {
+                        app_id,
+                        app_secret,
+                        verification_token,
+                        encrypt_key: None,
+                        allowed_users,
+                        use_feishu: false,
+                        receive_mode,
+                        port,
+                    });
+                }
             }
             ChannelMenuChoice::Nostr => {
                 // ── Nostr ──
@@ -5831,7 +5637,7 @@ mod tests {
         apply_provider_update(
             &mut config,
             "anthropic".to_string(),
-            "".to_string(),
+            String::new(),
             "claude-sonnet-4-5-20250929".to_string(),
             None,
         );
@@ -6514,8 +6320,6 @@ mod tests {
         assert_eq!(canonical_provider_name("dashscope-us"), "qwen");
         assert_eq!(canonical_provider_name("qwen-code"), "qwen-code");
         assert_eq!(canonical_provider_name("qwen-oauth"), "qwen-code");
-        assert_eq!(canonical_provider_name("codex"), "openai-codex");
-        assert_eq!(canonical_provider_name("openai_codex"), "openai-codex");
         assert_eq!(canonical_provider_name("moonshot-intl"), "moonshot");
         assert_eq!(canonical_provider_name("kimi-cn"), "moonshot");
         assert_eq!(canonical_provider_name("kimi_coding"), "kimi-code");
@@ -6750,10 +6554,6 @@ mod tests {
     #[test]
     fn models_endpoint_for_provider_supports_additional_openai_compatible_providers() {
         assert_eq!(
-            models_endpoint_for_provider("openai-codex"),
-            Some("https://api.openai.com/v1/models")
-        );
-        assert_eq!(
             models_endpoint_for_provider("venice"),
             Some("https://api.venice.ai/api/v1/models")
         );
@@ -6823,18 +6623,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_live_models_endpoint_supports_custom_provider_urls() {
-        assert_eq!(
-            resolve_live_models_endpoint("custom:https://proxy.example.com/v1", None),
-            Some("https://proxy.example.com/v1/models".to_string())
-        );
-        assert_eq!(
-            resolve_live_models_endpoint("custom:https://proxy.example.com/v1/models", None),
-            Some("https://proxy.example.com/v1/models".to_string())
-        );
-    }
-
-    #[test]
     fn normalize_ollama_endpoint_url_strips_api_suffix_and_trailing_slash() {
         assert_eq!(
             normalize_ollama_endpoint_url(" https://ollama.com/api/ "),
@@ -6895,17 +6683,6 @@ mod tests {
 
         let ids = parse_openai_compatible_model_ids(&payload);
         assert_eq!(ids, vec!["alpha".to_string(), "beta".to_string()]);
-    }
-
-    #[test]
-    fn normalize_model_ids_deduplicates_case_insensitively() {
-        let ids = normalize_model_ids(vec![
-            "GPT-5".to_string(),
-            "gpt-5".to_string(),
-            "gpt-5-mini".to_string(),
-            " GPT-5-MINI ".to_string(),
-        ]);
-        assert_eq!(ids, vec!["GPT-5".to_string(), "gpt-5-mini".to_string()]);
     }
 
     #[test]
@@ -7034,7 +6811,6 @@ mod tests {
     fn provider_env_var_known_providers() {
         assert_eq!(provider_env_var("openrouter"), "OPENROUTER_API_KEY");
         assert_eq!(provider_env_var("anthropic"), "ANTHROPIC_API_KEY");
-        assert_eq!(provider_env_var("openai-codex"), "OPENAI_API_KEY");
         assert_eq!(provider_env_var("openai"), "OPENAI_API_KEY");
         assert_eq!(provider_env_var("ollama"), "OLLAMA_API_KEY");
         assert_eq!(provider_env_var("llamacpp"), "LLAMACPP_API_KEY");
@@ -7076,16 +6852,6 @@ mod tests {
         assert!(provider_supports_keyless_local_usage("sglang"));
         assert!(provider_supports_keyless_local_usage("vllm"));
         assert!(!provider_supports_keyless_local_usage("openai"));
-    }
-
-    #[test]
-    fn provider_supports_device_flow_copilot() {
-        assert!(provider_supports_device_flow("copilot"));
-        assert!(provider_supports_device_flow("github-copilot"));
-        assert!(provider_supports_device_flow("gemini"));
-        assert!(provider_supports_device_flow("openai-codex"));
-        assert!(!provider_supports_device_flow("openai"));
-        assert!(!provider_supports_device_flow("openrouter"));
     }
 
     #[test]

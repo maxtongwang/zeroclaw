@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 
 pub struct OpenRouterProvider {
     credential: Option<String>,
-    max_tokens_override: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -18,8 +17,6 @@ struct ChatRequest {
     model: String,
     messages: Vec<Message>,
     temperature: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,8 +64,6 @@ struct NativeChatRequest {
     model: String,
     messages: Vec<NativeMessage>,
     temperature: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<NativeToolSpec>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -152,13 +147,8 @@ struct NativeResponseMessage {
 
 impl OpenRouterProvider {
     pub fn new(credential: Option<&str>) -> Self {
-        Self::new_with_max_tokens(credential, None)
-    }
-
-    pub fn new_with_max_tokens(credential: Option<&str>, max_tokens_override: Option<u32>) -> Self {
         Self {
             credential: credential.map(ToString::to_string),
-            max_tokens_override: max_tokens_override.filter(|value| *value > 0),
         }
     }
 
@@ -302,6 +292,7 @@ impl OpenRouterProvider {
             tool_calls,
             usage: None,
             reasoning_content,
+            quota_metadata: None,
         }
     }
 
@@ -361,7 +352,6 @@ impl Provider for OpenRouterProvider {
             model: model.to_string(),
             messages,
             temperature,
-            max_tokens: self.max_tokens_override,
         };
 
         let response = self
@@ -412,7 +402,6 @@ impl Provider for OpenRouterProvider {
             model: model.to_string(),
             messages: api_messages,
             temperature,
-            max_tokens: self.max_tokens_override,
         };
 
         let response = self
@@ -459,7 +448,6 @@ impl Provider for OpenRouterProvider {
             model: model.to_string(),
             messages: Self::convert_messages(request.messages),
             temperature,
-            max_tokens: self.max_tokens_override,
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
         };
@@ -554,7 +542,6 @@ impl Provider for OpenRouterProvider {
             model: model.to_string(),
             messages: native_messages,
             temperature,
-            max_tokens: self.max_tokens_override,
             tool_choice: native_tools.as_ref().map(|_| "auto".to_string()),
             tools: native_tools,
         };
@@ -676,7 +663,6 @@ mod tests {
                 },
             ],
             temperature: 0.5,
-            max_tokens: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -710,28 +696,12 @@ mod tests {
                 })
                 .collect(),
             temperature: 0.0,
-            max_tokens: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"role\":\"assistant\""));
         assert!(json.contains("\"role\":\"user\""));
         assert!(json.contains("google/gemini-2.5-pro"));
-    }
-
-    #[test]
-    fn chat_request_serializes_max_tokens_when_present() {
-        let request = ChatRequest {
-            model: "openai/gpt-4o".into(),
-            messages: vec![Message {
-                role: "user".into(),
-                content: MessageContent::Text("hello".into()),
-            }],
-            temperature: 0.2,
-            max_tokens: Some(2048),
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("\"max_tokens\":2048"));
     }
 
     #[test]
