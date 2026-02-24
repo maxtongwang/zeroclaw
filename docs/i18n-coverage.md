@@ -64,7 +64,17 @@ For `zh-CN`, `ja`, `ru`, and `fr`, canonical i18n directory hubs now include ful
 
 ## Collection Index i18n
 
-Localized `README.md` files under collection directories (`docs/getting-started/`, `docs/reference/`, `docs/operations/`, `docs/security/`, `docs/hardware/`, `docs/contributing/`, `docs/project/`) currently exist only for English and Vietnamese. Collection index localization for other locales is deferred.
+Localized category index files now exist for all supported locales under:
+
+- `docs/getting-started/README.<locale>.md`
+- `docs/reference/README.<locale>.md`
+- `docs/operations/README.<locale>.md`
+- `docs/security/README.<locale>.md`
+- `docs/hardware/README.<locale>.md`
+- `docs/contributing/README.<locale>.md`
+- `docs/project/README.<locale>.md`
+
+This closes collection-index localization parity for supported locales.
 
 ## Localization Rules
 

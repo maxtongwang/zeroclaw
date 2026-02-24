@@ -41,7 +41,6 @@ Completed in this PR stream:
 
 These are not baseline blockers, but can be advanced in future waves:
 
-- deeper per-collection localization indexes under category subdirectories
 - fuller narrative translation depth for bridge pages currently linked to English normative docs
 
 ## Tracking Rules

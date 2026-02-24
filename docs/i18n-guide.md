@@ -37,6 +37,7 @@ Use this matrix to decide required i18n follow-through in the same PR.
 | Root README language switch line changed | Update language switch line in all root `README*.md` files |
 | Docs hub language links changed | Update localized hub links in `docs/README.md` and every `docs/README*.md` / `docs/i18n/*/README.md` with an "Other languages" section |
 | Unified TOC language entry changed | Update `docs/SUMMARY.md` and every localized `docs/SUMMARY*.md` / `docs/i18n/*/SUMMARY.md` language-entry section |
+| Collection index changed (`docs/<collection>/README.md`) | Update every matching `docs/<collection>/README.<locale>.md` for all supported locales |
 | Any top-level runtime/governance/security doc changed under `docs/*.md` | Update corresponding file under every `docs/i18n/<locale>/` in the same PR |
 | Locale added/removed/renamed | Update root READMEs, docs hubs, summaries, `docs/i18n/README.md`, `docs/i18n-coverage.md`, and `docs/i18n-gap-backlog.md` |
 
