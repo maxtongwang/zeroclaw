@@ -14,7 +14,7 @@
 
 ## Ενσωμάτωση στο CI
 
-Στις αυτόματες ροές εργασιών ([`.github/workflows/ci-build-fast.yml`](../.github/workflows/ci-build-fast.yml)), το `cargo-slicer` χρησιμοποιείται για ταχεία επαλήθευση.
+Στις αυτόματες ροές εργασιών ([`.github/workflows/ci-build-fast.yml`](../../../.github/workflows/ci-build-fast.yml)), το `cargo-slicer` χρησιμοποιείται για ταχεία επαλήθευση.
 
 **Στρατηγική Επιβίωσης**:
 - **Πρωτεύουσα**: Χρήση `cargo-slicer` για μέγιστη ταχύτητα.

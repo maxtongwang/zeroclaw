@@ -25,7 +25,7 @@
 
 ## 3. Φύλλα Δεδομένων (Datasheets)
 
-- **Ευρετήριο Φύλλων Δεδομένων**: [../datasheets](../datasheets)
+- **Ευρετήριο Φύλλων Δεδομένων**: [../datasheets/README.md](../datasheets/README.md)
 - **STM32 Nucleo-F401RE**: [../datasheets/nucleo-f401re.md](../datasheets/nucleo-f401re.md)
 - **Arduino Uno**: [../datasheets/arduino-uno.md](../datasheets/arduino-uno.md)
 - **ESP32**: [../datasheets/esp32.md](../datasheets/esp32.md)
