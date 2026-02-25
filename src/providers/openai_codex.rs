@@ -310,7 +310,13 @@ fn clamp_reasoning_effort(model: &str, effort: &str) -> String {
 fn resolve_reasoning_effort(model_id: &str, config_level: Option<&str>) -> String {
     // Priority: config value > env var > default
     let raw = config_level
-        .and_then(|s| if s.is_empty() { None } else { Some(s.to_string()) })
+        .and_then(|s| {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        })
         .or_else(|| {
             std::env::var("ZEROCLAW_CODEX_REASONING_EFFORT")
                 .ok()

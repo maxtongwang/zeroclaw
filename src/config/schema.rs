@@ -4840,11 +4840,14 @@ impl Config {
         }
 
         // Reasoning level: ZEROCLAW_REASONING_LEVEL or REASONING_LEVEL
-        if let Ok(level) = std::env::var("ZEROCLAW_REASONING_LEVEL")
-            .or_else(|_| std::env::var("REASONING_LEVEL"))
+        if let Ok(level) =
+            std::env::var("ZEROCLAW_REASONING_LEVEL").or_else(|_| std::env::var("REASONING_LEVEL"))
         {
             let level = level.trim().to_ascii_lowercase();
-            if matches!(level.as_str(), "low" | "medium" | "high" | "xhigh" | "minimal") {
+            if matches!(
+                level.as_str(),
+                "low" | "medium" | "high" | "xhigh" | "minimal"
+            ) {
                 self.runtime.reasoning_level = Some(level);
             }
         }
