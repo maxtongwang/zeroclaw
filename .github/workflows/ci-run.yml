@@ -285,6 +285,8 @@ jobs:
         steps:
             - name: Checkout repository
               uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+              with:
+                  ref: ${{ github.event.pull_request.base.sha }}
 
             - name: Require at least one human approving review
               uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8

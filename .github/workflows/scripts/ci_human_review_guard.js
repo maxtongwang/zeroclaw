@@ -32,9 +32,11 @@ module.exports = async ({ github, context, core }) => {
   });
 
   const latestReviewByUser = new Map();
+  const decisiveStates = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]);
   for (const review of reviews) {
     const login = review.user?.login?.toLowerCase();
     if (!login) continue;
+    if (!decisiveStates.has(review.state)) continue;
     latestReviewByUser.set(login, {
       state: review.state,
       type: review.user?.type || "",
