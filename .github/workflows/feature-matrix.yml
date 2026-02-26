@@ -18,7 +18,7 @@ env:
 jobs:
     feature-check:
         name: Check (${{ matrix.name }})
-        runs-on: blacksmith-2vcpu-ubuntu-2404
+        runs-on: self-hosted
         timeout-minutes: 30
         strategy:
             fail-fast: false

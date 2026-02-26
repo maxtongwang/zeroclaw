@@ -23,7 +23,7 @@ permissions:
 jobs:
     publish-homebrew-core:
         name: Publish Homebrew Core PR
-        runs-on: blacksmith-2vcpu-ubuntu-2404
+        runs-on: self-hosted
         env:
             UPSTREAM_REPO: Homebrew/homebrew-core
             FORMULA_PATH: Formula/z/zeroclaw.rb
