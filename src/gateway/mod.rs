@@ -1721,7 +1721,7 @@ async fn handle_bluebubbles_webhook(
             .get("Authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "));
-        if provided != Some(expected.as_ref()) {
+        if !provided.is_some_and(|t| constant_time_eq(t, expected.as_ref())) {
             tracing::warn!("BlueBubbles webhook auth failed (missing or invalid Bearer token)");
             return (
                 StatusCode::UNAUTHORIZED,

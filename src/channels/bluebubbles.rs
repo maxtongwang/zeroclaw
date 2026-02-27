@@ -11,7 +11,6 @@ const FROM_ME_CACHE_MAX: usize = 500;
 struct FromMeCacheEntry {
     chat_guid: String,
     body: String,
-    timestamp: u64,
 }
 
 /// Interior-mutable FIFO cache for `fromMe` messages.
@@ -238,7 +237,7 @@ impl BlueBubblesChannel {
     }
 
     /// Cache a `fromMe` message for later reply-context resolution.
-    fn cache_from_me(&self, message_id: &str, chat_guid: &str, body: &str, timestamp: u64) {
+    fn cache_from_me(&self, message_id: &str, chat_guid: &str, body: &str) {
         if message_id.is_empty() {
             return;
         }
@@ -247,7 +246,6 @@ impl BlueBubblesChannel {
             FromMeCacheEntry {
                 chat_guid: chat_guid.to_string(),
                 body: body.to_string(),
-                timestamp,
             },
         );
     }
@@ -376,8 +374,7 @@ impl BlueBubblesChannel {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let timestamp = Self::extract_timestamp(data);
-            self.cache_from_me(&message_id, &chat_guid, &body, timestamp);
+            self.cache_from_me(&message_id, &chat_guid, &body);
             tracing::debug!("BlueBubbles: cached fromMe message {message_id}");
             return messages;
         }

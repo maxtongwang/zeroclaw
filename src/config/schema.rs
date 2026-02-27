@@ -4062,7 +4062,7 @@ impl ChannelConfig for LinqConfig {
 ///
 /// BlueBubbles is a self-hosted macOS server that exposes iMessage via a
 /// REST API and webhook push notifications. See <https://bluebubbles.app>.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BlueBubblesConfig {
     /// BlueBubbles server URL (e.g. `http://192.168.1.100:1234` or ngrok URL)
     pub server_url: String,
@@ -4075,6 +4075,20 @@ pub struct BlueBubblesConfig {
     /// If set, incoming requests must include `Authorization: Bearer <secret>`.
     #[serde(default)]
     pub webhook_secret: Option<String>,
+}
+
+impl std::fmt::Debug for BlueBubblesConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlueBubblesConfig")
+            .field("server_url", &self.server_url)
+            .field("password", &"[REDACTED]")
+            .field("allowed_senders", &self.allowed_senders)
+            .field(
+                "webhook_secret",
+                &self.webhook_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 impl ChannelConfig for BlueBubblesConfig {
