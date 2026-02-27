@@ -183,14 +183,20 @@ impl Tool for PicoFlashTool {
             Some(p) => {
                 let port_str = p.to_string_lossy();
                 let mut reg = self.registry.write().await;
-                // Try "pico0" first — the most common alias.
-                let alias = reg
+                // Try to find a pico alias in the registry.
+                match reg
                     .aliases()
                     .into_iter()
                     .find(|a| a.starts_with("pico"))
-                    .unwrap_or("pico0")
-                    .to_string();
-                reg.reconnect(&alias, Some(&port_str)).await
+                {
+                    Some(a) => {
+                        let alias = a.to_string();
+                        reg.reconnect(&alias, Some(&port_str)).await
+                    }
+                    None => Err(anyhow::anyhow!(
+                        "no pico alias found in registry; cannot reconnect transport"
+                    )),
+                }
             }
             None => Err(anyhow::anyhow!("no serial port to reconnect")),
         };

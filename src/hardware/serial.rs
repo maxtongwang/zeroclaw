@@ -31,19 +31,8 @@ pub const DEFAULT_BAUD: u32 = 115_200;
 const PING_TIMEOUT_MS: u64 = 300;
 
 /// Allowed serial device path prefixes — reject arbitrary paths for security.
-const ALLOWED_PATH_PREFIXES: &[&str] = &[
-    "/dev/ttyACM",        // Linux USB CDC (Pico, Nucleo, etc.)
-    "/dev/ttyUSB",        // Linux USB-serial (CH340, FTDI)
-    "/dev/tty.usbmodem",  // macOS USB CDC
-    "/dev/cu.usbmodem",   // macOS USB CDC (call-up)
-    "/dev/tty.usbserial", // macOS FTDI
-    "/dev/cu.usbserial",  // macOS FTDI (call-up)
-    "COM",                // Windows
-];
-
-fn is_path_allowed(path: &str) -> bool {
-    ALLOWED_PATH_PREFIXES.iter().any(|p| path.starts_with(p))
-}
+/// Uses the shared allowlist from `crate::util`.
+use crate::util::is_serial_path_allowed as is_path_allowed;
 
 /// Serial transport for ZeroClaw hardware devices.
 ///
@@ -85,9 +74,13 @@ impl HardwareSerialTransport {
     /// This method never returns an error — discovery must not hang on failure.
     pub async fn ping_handshake(&self) -> bool {
         let ping = ZcCommand::simple("ping");
+        let json = match serde_json::to_string(&ping) {
+            Ok(j) => j,
+            Err(_) => return false,
+        };
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(PING_TIMEOUT_MS),
-            do_send(&self.port_path, self.baud_rate, &ping),
+            do_send(&self.port_path, self.baud_rate, &json),
         )
         .await;
 
@@ -117,13 +110,14 @@ impl Transport for HardwareSerialTransport {
             )));
         }
 
-        let json = serde_json::to_string(cmd)
-            .unwrap_or_else(|_| "<serialize-error>".to_string());
+        let json = serde_json::to_string(cmd).map_err(|e| {
+            TransportError::Protocol(format!("failed to serialize command: {e}"))
+        })?;
         tracing::info!(port = %self.port_path, cmd = %json, "serial send");
 
         tokio::time::timeout(
             std::time::Duration::from_secs(SEND_TIMEOUT_SECS),
-            do_send(&self.port_path, self.baud_rate, cmd),
+            do_send(&self.port_path, self.baud_rate, &json),
         )
         .await
         .map_err(|_| TransportError::Timeout(SEND_TIMEOUT_SECS))?
@@ -146,26 +140,21 @@ impl Transport for HardwareSerialTransport {
 async fn do_send(
     path: &str,
     baud: u32,
-    cmd: &ZcCommand,
+    json: &str,
 ) -> Result<ZcResponse, TransportError> {
-    // Serialize command to JSON line
-    let json = serde_json::to_string(cmd).map_err(|e| {
-        TransportError::Protocol(format!("failed to serialize command: {e}"))
-    })?;
-
     // Open port lazily — released when this function returns
     let mut port = tokio_serial::new(path, baud)
         .open_native_async()
         .map_err(|e| {
-            let msg = e.to_string();
-            // "No such file or directory" means the device is not plugged in.
-            if msg.contains("No such file")
-                || msg.contains("not found")
-                || msg.contains("device not found")
-            {
-                TransportError::Disconnected
-            } else {
-                TransportError::Other(format!("failed to open {path}: {msg}"))
+            // Match on the error kind for robust cross-platform disconnect detection.
+            match e.kind {
+                tokio_serial::ErrorKind::NoDevice => TransportError::Disconnected,
+                tokio_serial::ErrorKind::Io(io_kind)
+                    if io_kind == std::io::ErrorKind::NotFound =>
+                {
+                    TransportError::Disconnected
+                }
+                _ => TransportError::Other(format!("failed to open {path}: {e}")),
             }
         })?;
 

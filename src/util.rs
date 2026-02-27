@@ -136,3 +136,26 @@ mod tests {
         assert_eq!(truncate_with_ellipsis("hello", 0), "...");
     }
 }
+
+// ── Serial path allowlist ─────────────────────────────────────────────────────
+
+/// Allowed serial device path prefixes — reject arbitrary paths for security.
+///
+/// Shared between `hardware::serial` and `peripherals::serial` to keep the
+/// allowlist consistent across transport implementations.
+pub const ALLOWED_SERIAL_PATH_PREFIXES: &[&str] = &[
+    "/dev/ttyACM",        // Linux USB CDC (Pico, Nucleo, etc.)
+    "/dev/ttyUSB",        // Linux USB-serial (CH340, FTDI)
+    "/dev/tty.usbmodem",  // macOS USB CDC
+    "/dev/cu.usbmodem",   // macOS USB CDC (call-up)
+    "/dev/tty.usbserial", // macOS FTDI
+    "/dev/cu.usbserial",  // macOS FTDI (call-up)
+    "COM",                // Windows
+];
+
+/// Check whether a serial device path is in the allowed prefix list.
+pub fn is_serial_path_allowed(path: &str) -> bool {
+    ALLOWED_SERIAL_PATH_PREFIXES
+        .iter()
+        .any(|p| path.starts_with(p))
+}

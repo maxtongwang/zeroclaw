@@ -1,8 +1,8 @@
 //! Serial peripheral — STM32 and similar boards over USB CDC/serial.
 //!
-//! Protocol: newline-delimited JSON.
-//! Request:  {"id":"1","cmd":"gpio_write","args":{"pin":13,"value":1}}
-//! Response: {"id":"1","ok":true,"result":"done"}
+//! Protocol: newline-delimited JSON (ZeroClaw wire protocol).
+//! Request:  {"cmd":"gpio_write","params":{"pin":13,"value":1}}
+//! Response: {"cmd":"gpio_write","ok":true,"data":"done"}
 
 use super::traits::Peripheral;
 use crate::config::PeripheralBoardConfig;
@@ -14,20 +14,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
 
-/// Allowed serial path patterns (security: deny arbitrary paths).
-const ALLOWED_PATH_PREFIXES: &[&str] = &[
-    "/dev/ttyACM",
-    "/dev/ttyUSB",
-    "/dev/tty.usbmodem",
-    "/dev/cu.usbmodem",
-    "/dev/tty.usbserial",
-    "/dev/cu.usbserial", // Arduino Uno (FTDI), clones
-    "COM",               // Windows
-];
-
-fn is_path_allowed(path: &str) -> bool {
-    ALLOWED_PATH_PREFIXES.iter().any(|p| path.starts_with(p))
-}
+/// Uses the shared serial path allowlist from `crate::util`.
+use crate::util::is_serial_path_allowed as is_path_allowed;
 
 /// JSON request/response over serial — ZeroClaw wire protocol.
 ///
@@ -268,6 +256,12 @@ impl Tool for GpioWriteTool {
             .get("value")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| anyhow::anyhow!("Missing 'value' parameter"))?;
+        if value != 0 && value != 1 {
+            return Err(anyhow::anyhow!(
+                "Invalid 'value' parameter: expected 0 or 1, got {}",
+                value
+            ));
+        }
         self.transport
             .request("gpio_write", json!({ "pin": pin, "value": value }))
             .await

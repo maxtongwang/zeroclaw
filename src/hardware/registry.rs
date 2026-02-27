@@ -81,6 +81,11 @@ const KNOWN_BOARDS: &[BoardInfo] = &[
         architecture: Some("ARM Cortex-M0+ (RP2040)"),
     },
     // Pico W (with CYW43 wireless)
+    // NOTE: PID 0xF00A is not in the official Raspberry Pi USB PID allocation.
+    // MicroPython on Pico W typically uses PID 0x0005 (CDC REPL). This entry
+    // is a placeholder for custom ZeroClaw firmware that sets PID 0xF00A.
+    // If using stock MicroPython, the Pico W will match the 0x0005 entry above.
+    // Reference: https://github.com/raspberrypi/usb-pid (official PID list).
     BoardInfo {
         vid: 0x2e8a,
         pid: 0xf00a,

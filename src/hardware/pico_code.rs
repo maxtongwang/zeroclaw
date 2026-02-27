@@ -281,10 +281,16 @@ impl Tool for DeviceWriteCodeTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let code = args
-            .get("code")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing required parameter: code"))?;
+        let code = match args.get("code").and_then(|v| v.as_str()) {
+            Some(c) => c,
+            None => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("missing required parameter: code".to_string()),
+                });
+            }
+        };
 
         if code.trim().is_empty() {
             return Ok(ToolResult {
@@ -309,8 +315,12 @@ impl Tool for DeviceWriteCodeTool {
 
         tracing::info!(alias = %alias, port = %port, runtime = %runtime, code_len = code.len(), "writing main.py to device");
 
-        // Write code to a temp file.
-        let tmp_path = std::env::temp_dir().join("zeroclaw_main.py");
+        // Write code to a per-invocation unique temp file to avoid races.
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp_path = std::env::temp_dir().join(format!("zeroclaw_main_{}.py", unique_id));
         if let Err(e) = tokio::fs::write(&tmp_path, code).await {
             return Ok(ToolResult {
                 success: false,
@@ -418,10 +428,16 @@ impl Tool for DeviceExecTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let code = args
-            .get("code")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("missing required parameter: code"))?;
+        let code = match args.get("code").and_then(|v| v.as_str()) {
+            Some(c) => c,
+            None => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("missing required parameter: code".to_string()),
+                });
+            }
+        };
 
         if code.trim().is_empty() {
             return Ok(ToolResult {
@@ -449,8 +465,12 @@ impl Tool for DeviceExecTool {
 
         tracing::info!(alias = %alias, port = %port, runtime = %runtime, code_len = code.len(), "executing snippet on device");
 
-        // Write snippet to a temp file.
-        let tmp_path = std::env::temp_dir().join("zeroclaw_exec.py");
+        // Write snippet to a per-invocation unique temp file to avoid races.
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp_path = std::env::temp_dir().join(format!("zeroclaw_exec_{}.py", unique_id));
         if let Err(e) = tokio::fs::write(&tmp_path, code).await {
             return Ok(ToolResult {
                 success: false,

@@ -128,8 +128,22 @@ impl Tool for SubprocessTool {
 
         // Write JSON args + newline to stdin, then drop stdin to signal EOF.
         if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(args_json.as_bytes()).await;
-            let _ = stdin.write_all(b"\n").await;
+            if let Err(e) = stdin.write_all(args_json.as_bytes()).await {
+                let _ = child.kill().await;
+                return Err(anyhow::anyhow!(
+                    "failed to write args to plugin '{}' stdin: {}",
+                    self.manifest.tool.name,
+                    e
+                ));
+            }
+            if let Err(e) = stdin.write_all(b"\n").await {
+                let _ = child.kill().await;
+                return Err(anyhow::anyhow!(
+                    "failed to write newline to plugin '{}' stdin: {}",
+                    self.manifest.tool.name,
+                    e
+                ));
+            }
             // stdin dropped here → child receives EOF
         }
 
@@ -219,8 +233,10 @@ impl Tool for SubprocessTool {
                             self.manifest.tool.name,
                             parse_err,
                             // Truncate oversized output in the error message.
-                            if line.len() > 200 {
-                                format!("{}...", &line[..200])
+                            // Use char-based truncation to avoid panic on multi-byte UTF-8.
+                            if line.chars().count() > 200 {
+                                let truncated: String = line.chars().take(200).collect();
+                                format!("{}...", truncated)
                             } else {
                                 line.to_string()
                             }

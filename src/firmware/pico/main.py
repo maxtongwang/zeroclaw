@@ -25,6 +25,11 @@ def handle(msg):
         value   = params.get("value")
         if pin_num is None or value is None:
             return {"ok": False, "error": "missing pin or value"}
+        # Normalize value: accept bool or int, must resolve to 0 or 1.
+        if isinstance(value, bool):
+            value = int(value)
+        if not isinstance(value, int) or value not in (0, 1):
+            return {"ok": False, "error": "invalid value: must be 0 or 1"}
         if pin_num == 25:
             led.value(value)
         else:

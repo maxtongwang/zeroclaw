@@ -67,13 +67,16 @@ pub fn scan_plugin_dir() -> Vec<LoadedPlugin> {
 
     println!(
         "[registry] scanning {}...",
-        tools_dir
-            .to_str()
-            .unwrap_or("~/.zeroclaw/tools")
-            .replace(
-                dirs_home().as_deref().unwrap_or(""),
-                "~"
-            )
+        match dirs_home().as_deref().filter(|s| !s.is_empty()) {
+            Some(home) => tools_dir
+                .to_str()
+                .unwrap_or("~/.zeroclaw/tools")
+                .replace(home, "~"),
+            None => tools_dir
+                .to_str()
+                .unwrap_or("~/.zeroclaw/tools")
+                .to_string(),
+        }
     );
 
     let mut plugins = Vec::new();
@@ -148,7 +151,25 @@ fn load_one_plugin(plugin_dir: &Path, manifest_path: &Path) -> Result<LoadedPlug
         anyhow::bail!("manifest missing [exec] binary");
     }
 
-    let binary_path = plugin_dir.join(&manifest.exec.binary);
+    // Validate binary path: must exist, be a regular file, and reside within plugin_dir.
+    let canonical_plugin_dir = plugin_dir.canonicalize()
+        .map_err(|e| anyhow::anyhow!("cannot canonicalize plugin dir {:?}: {}", plugin_dir, e))?;
+    let raw_binary_path = plugin_dir.join(&manifest.exec.binary);
+    if !raw_binary_path.exists() {
+        anyhow::bail!("manifest exec binary not found: {:?}", raw_binary_path);
+    }
+    let binary_path = raw_binary_path.canonicalize()
+        .map_err(|e| anyhow::anyhow!("cannot canonicalize binary path {:?}: {}", raw_binary_path, e))?;
+    if !binary_path.starts_with(&canonical_plugin_dir) {
+        anyhow::bail!(
+            "manifest exec binary escapes plugin directory: {:?} is not under {:?}",
+            binary_path,
+            canonical_plugin_dir
+        );
+    }
+    if !binary_path.is_file() {
+        anyhow::bail!("manifest exec binary is not a regular file: {:?}", binary_path);
+    }
 
     let name = manifest.tool.name.clone();
     let version = manifest.tool.version.clone();

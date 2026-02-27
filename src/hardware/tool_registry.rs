@@ -70,6 +70,9 @@ impl ToolRegistry {
         // ── 1. Built-in tools ─────────────────────────────────────────────
         for tool in gpio_tools(devices.clone()) {
             let name = tool.name().to_string();
+            if tools.contains_key(&name) {
+                anyhow::bail!("duplicate built-in tool name: '{}'", name);
+            }
             println!("[registry] loaded built-in: {}", name);
             tools.insert(name, tool);
         }
@@ -81,6 +84,9 @@ impl ToolRegistry {
                 super::pico_flash::PicoFlashTool::new(devices.clone()),
             );
             let name = tool.name().to_string();
+            if tools.contains_key(&name) {
+                anyhow::bail!("duplicate built-in tool name: '{}'", name);
+            }
             println!("[registry] loaded built-in: {}", name);
             tools.insert(name, tool);
         }
@@ -90,6 +96,9 @@ impl ToolRegistry {
         {
             for tool in super::pico_code::device_code_tools(devices.clone()) {
                 let name = tool.name().to_string();
+                if tools.contains_key(&name) {
+                    anyhow::bail!("duplicate built-in tool name: '{}'", name);
+                }
                 println!("[registry] loaded built-in: {}", name);
                 tools.insert(name, tool);
             }
@@ -98,6 +107,12 @@ impl ToolRegistry {
         // ── 2. User plugins ───────────────────────────────────────────────
         let plugins = scan_plugin_dir();
         for plugin in plugins {
+            if tools.contains_key(&plugin.name) {
+                anyhow::bail!(
+                    "duplicate tool name: plugin '{}' conflicts with an existing tool",
+                    plugin.name
+                );
+            }
             println!(
                 "[registry] loaded plugin: {} (v{})",
                 plugin.name, plugin.version

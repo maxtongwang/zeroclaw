@@ -151,42 +151,59 @@ pub async fn flash_uf2(mount_point: &Path, firmware_dir: &Path) -> Result<()> {
 
     // ── Attempt 2: cp via subprocess ──────────────────────────────────────────
     {
-        let out = tokio::process::Command::new("cp")
-            .arg(&src_str)
-            .arg(&dst_str)
-            .output()
-            .await;
+        /// Timeout for subprocess copy attempts (seconds).
+        const CP_TIMEOUT_SECS: u64 = 10;
+
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(CP_TIMEOUT_SECS),
+            tokio::process::Command::new("cp")
+                .arg(&src_str)
+                .arg(&dst_str)
+                .output(),
+        )
+        .await;
 
         match out {
-            Ok(o) if o.status.success() => {
+            Err(_elapsed) => {
+                tracing::warn!("cp timed out after {}s, trying sudo cp", CP_TIMEOUT_SECS);
+            }
+            Ok(Ok(o)) if o.status.success() => {
                 tracing::info!("UF2 copy complete (cp) — Pico will reboot");
                 return Ok(());
             }
-            Ok(o) => {
+            Ok(Ok(o)) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);
                 tracing::warn!("cp failed ({}), trying sudo cp", stderr.trim());
             }
-            Err(e) => tracing::warn!("cp spawn failed ({}), trying sudo cp", e),
+            Ok(Err(e)) => tracing::warn!("cp spawn failed ({}), trying sudo cp", e),
         }
     }
 
-    // ── Attempt 3: sudo cp ────────────────────────────────────────────────────
+    // ── Attempt 3: sudo cp (non-interactive) ─────────────────────────────────
     {
-        let out = tokio::process::Command::new("sudo")
-            .args(["cp", &src_str, &dst_str])
-            .output()
-            .await;
+        const SUDO_CP_TIMEOUT_SECS: u64 = 10;
+
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(SUDO_CP_TIMEOUT_SECS),
+            tokio::process::Command::new("sudo")
+                .args(["-n", "cp", &src_str, &dst_str])
+                .output(),
+        )
+        .await;
 
         match out {
-            Ok(o) if o.status.success() => {
+            Err(_elapsed) => {
+                tracing::warn!("sudo cp timed out after {}s", SUDO_CP_TIMEOUT_SECS);
+            }
+            Ok(Ok(o)) if o.status.success() => {
                 tracing::info!("UF2 copy complete (sudo cp) — Pico will reboot");
                 return Ok(());
             }
-            Ok(o) => {
+            Ok(Ok(o)) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);
                 tracing::warn!("sudo cp failed: {}", stderr.trim());
             }
-            Err(e) => tracing::warn!("sudo cp spawn failed: {}", e),
+            Ok(Err(e)) => tracing::warn!("sudo cp spawn failed: {}", e),
         }
     }
 

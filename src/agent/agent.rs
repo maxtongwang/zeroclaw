@@ -272,19 +272,8 @@ impl Agent {
 
         // ── Hardware registry tools (Phase 4 ToolRegistry + plugins) ──
         let hw_boot = crate::hardware::boot(&config.peripherals).await?;
-        if !hw_boot.tools.is_empty() {
-            let existing: std::collections::HashSet<String> =
-                tools.iter().map(|t| t.name().to_string()).collect();
-            let new_hw_tools: Vec<Box<dyn Tool>> = hw_boot
-                .tools
-                .into_iter()
-                .filter(|t| !existing.contains(t.name()))
-                .collect();
-            if !new_hw_tools.is_empty() {
-                tracing::info!(count = new_hw_tools.len(), "Hardware registry tools added (Agent)");
-                tools.extend(new_hw_tools);
-            }
-        }
+        let (_hw_device_summary, _hw_added_tool_names) =
+            crate::hardware::merge_hardware_tools(&mut tools, hw_boot);
 
         let provider_name = config.default_provider.as_deref().unwrap_or("openrouter");
 

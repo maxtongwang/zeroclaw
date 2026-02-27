@@ -272,7 +272,10 @@ impl DeviceRegistry {
         }
 
         let mut lines = vec!["Connected devices:".to_string()];
-        for (alias, entry) in &self.devices {
+        let mut sorted_aliases: Vec<&String> = self.devices.keys().collect();
+        sorted_aliases.sort();
+        for alias in sorted_aliases {
+            let entry = &self.devices[alias];
             let status = entry
                 .transport
                 .as_ref()
@@ -295,6 +298,59 @@ impl DeviceRegistry {
             ));
         }
         lines.join("\n")
+    }
+
+    /// Resolve a GPIO-capable device alias from tool arguments.
+    ///
+    /// If `args["device"]` is provided, uses that alias directly.
+    /// Otherwise, auto-selects the single GPIO-capable device, returning an
+    /// error description if zero or multiple GPIO devices are available.
+    ///
+    /// On success returns `(alias, DeviceContext)` — both are owned / Arc-based
+    /// so the caller can drop the registry lock before doing async I/O.
+    pub fn resolve_gpio_device(
+        &self,
+        args: &serde_json::Value,
+    ) -> Result<(String, DeviceContext), String> {
+        let device_alias: String = match args.get("device").and_then(|v| v.as_str()) {
+            Some(a) => a.to_string(),
+            None => {
+                let gpio_aliases: Vec<String> = self
+                    .aliases()
+                    .into_iter()
+                    .filter(|a| {
+                        self.context(a)
+                            .map(|c| c.capabilities.gpio)
+                            .unwrap_or(false)
+                    })
+                    .map(|a| a.to_string())
+                    .collect();
+                match gpio_aliases.as_slice() {
+                    [single] => single.clone(),
+                    [] => {
+                        return Err(
+                            "no GPIO-capable device found; specify \"device\" parameter"
+                                .to_string(),
+                        );
+                    }
+                    _ => {
+                        return Err(format!(
+                            "multiple devices available ({}); specify \"device\" parameter",
+                            gpio_aliases.join(", ")
+                        ));
+                    }
+                }
+            }
+        };
+
+        let ctx = self.context(&device_alias).ok_or_else(|| {
+            format!(
+                "device '{}' not found or has no transport attached",
+                device_alias
+            )
+        })?;
+
+        Ok((device_alias, ctx))
     }
 
     /// Number of registered devices.
@@ -361,7 +417,8 @@ impl DeviceRegistry {
 
             // For unknown VIDs, run the ping handshake before registering.
             // This avoids registering random USB-serial adapters.
-            if !is_known_vid {
+            // If the probe succeeds we reuse the same transport instance below.
+            let probe_transport = if !is_known_vid {
                 let probe = HardwareSerialTransport::new(&info.port_path, DEFAULT_BAUD);
                 if !probe.ping_handshake().await {
                     tracing::debug!(
@@ -370,7 +427,10 @@ impl DeviceRegistry {
                     );
                     continue;
                 }
-            }
+                Some(probe)
+            } else {
+                None
+            };
 
             let board_name = info
                 .board_name
@@ -389,8 +449,12 @@ impl DeviceRegistry {
             // For unknown-VID devices that passed ping: mark as Generic.
             // (register() will have already set kind = Generic for vid=None)
 
-            let transport = Arc::new(HardwareSerialTransport::new(&info.port_path, DEFAULT_BAUD))
-                as Arc<dyn super::transport::Transport>;
+            let transport: Arc<dyn super::transport::Transport> =
+                if let Some(probe) = probe_transport {
+                    Arc::new(probe)
+                } else {
+                    Arc::new(HardwareSerialTransport::new(&info.port_path, DEFAULT_BAUD))
+                };
             let caps = DeviceCapabilities {
                 gpio: true, // assume GPIO; Phase 3 will populate via capabilities handshake
                 ..DeviceCapabilities::default()

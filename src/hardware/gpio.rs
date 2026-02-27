@@ -91,55 +91,22 @@ impl Tool for GpioWriteTool {
             });
         }
 
-        let registry = self.registry.read().await;
-
-        // Resolve device alias: use provided value or auto-select the sole GPIO device.
-        let device_alias: String = match args.get("device").and_then(|v| v.as_str()) {
-            Some(a) => a.to_string(),
-            None => {
-                let gpio_aliases: Vec<String> = registry
-                    .aliases()
-                    .into_iter()
-                    .filter(|a| {
-                        registry
-                            .context(a)
-                            .map(|c| c.capabilities.gpio)
-                            .unwrap_or(false)
-                    })
-                    .map(|a| a.to_string())
-                    .collect();
-                match gpio_aliases.as_slice() {
-                    [single] => single.clone(),
-                    [] => {
-                        return Ok(ToolResult {
-                            success: false,
-                            output: String::new(),
-                            error: Some(
-                                "no GPIO-capable device found; specify \"device\" parameter"
-                                    .to_string(),
-                            ),
-                        });
-                    }
-                    _ => {
-                        return Ok(ToolResult {
-                            success: false,
-                            output: String::new(),
-                            error: Some(format!(
-                                "multiple devices available ({}); specify \"device\" parameter",
-                                gpio_aliases.join(", ")
-                            )),
-                        });
-                    }
+        // Resolve device alias and obtain an owned context (Arc-based) before
+        // dropping the registry read guard — avoids holding the lock across async I/O.
+        let (device_alias, ctx) = {
+            let registry = self.registry.read().await;
+            match registry.resolve_gpio_device(&args) {
+                Ok(resolved) => resolved,
+                Err(msg) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(msg),
+                    });
                 }
             }
+            // registry read guard dropped here
         };
-
-        let ctx = registry.context(&device_alias).ok_or_else(|| {
-            anyhow::anyhow!(
-                "device '{}' not found or has no transport attached",
-                device_alias
-            )
-        })?;
 
         let cmd = ZcCommand::new("gpio_write", json!({ "pin": pin, "value": value }));
 
@@ -222,55 +189,22 @@ impl Tool for GpioReadTool {
             .and_then(|v| v.as_u64())
             .ok_or_else(|| anyhow::anyhow!("missing required parameter: pin"))?;
 
-        let registry = self.registry.read().await;
-
-        // Resolve device alias: use provided value or auto-select the sole GPIO device.
-        let device_alias: String = match args.get("device").and_then(|v| v.as_str()) {
-            Some(a) => a.to_string(),
-            None => {
-                let gpio_aliases: Vec<String> = registry
-                    .aliases()
-                    .into_iter()
-                    .filter(|a| {
-                        registry
-                            .context(a)
-                            .map(|c| c.capabilities.gpio)
-                            .unwrap_or(false)
-                    })
-                    .map(|a| a.to_string())
-                    .collect();
-                match gpio_aliases.as_slice() {
-                    [single] => single.clone(),
-                    [] => {
-                        return Ok(ToolResult {
-                            success: false,
-                            output: String::new(),
-                            error: Some(
-                                "no GPIO-capable device found; specify \"device\" parameter"
-                                    .to_string(),
-                            ),
-                        });
-                    }
-                    _ => {
-                        return Ok(ToolResult {
-                            success: false,
-                            output: String::new(),
-                            error: Some(format!(
-                                "multiple devices available ({}); specify \"device\" parameter",
-                                gpio_aliases.join(", ")
-                            )),
-                        });
-                    }
+        // Resolve device alias and obtain an owned context (Arc-based) before
+        // dropping the registry read guard — avoids holding the lock across async I/O.
+        let (device_alias, ctx) = {
+            let registry = self.registry.read().await;
+            match registry.resolve_gpio_device(&args) {
+                Ok(resolved) => resolved,
+                Err(msg) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(msg),
+                    });
                 }
             }
+            // registry read guard dropped here
         };
-
-        let ctx = registry.context(&device_alias).ok_or_else(|| {
-            anyhow::anyhow!(
-                "device '{}' not found or has no transport attached",
-                device_alias
-            )
-        })?;
 
         let cmd = ZcCommand::new("gpio_read", json!({ "pin": pin }));
 
@@ -480,12 +414,14 @@ mod tests {
 
         let result = tool
             .execute(json!({"device": "nonexistent", "pin": 25, "value": 1}))
-            .await;
+            .await
+            .unwrap();
 
-        assert!(result.is_err());
+        assert!(!result.success);
         assert!(result
-            .unwrap_err()
-            .to_string()
+            .error
+            .as_deref()
+            .unwrap()
             .contains("not found"));
     }
 

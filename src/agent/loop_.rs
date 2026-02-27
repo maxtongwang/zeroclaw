@@ -1107,7 +1107,8 @@ pub(crate) async fn run_tool_call_loop(
             });
             let start = Instant::now();
             let result = if let Some(tool) = find_tool(tools_registry, &call.name) {
-                tracing::info!(tool = %call.name, args = %call.arguments, "dispatching tool");
+                tracing::info!(tool = %call.name, "dispatching tool");
+                tracing::debug!(tool = %call.name, args = %call.arguments, "tool arguments");
                 match tool.execute(call.arguments.clone()).await {
                     Ok(r) => {
                         observer.record_event(&ObserverEvent::ToolCall {
@@ -1161,6 +1162,17 @@ pub(crate) async fn run_tool_call_loop(
     }
 
     anyhow::bail!("Agent exceeded maximum tool iterations ({max_iterations})")
+}
+
+/// Append the hardware device summary to the system prompt if non-trivial.
+fn append_hw_summary(system_prompt: &mut String, hw_device_summary: &str) {
+    if !hw_device_summary.is_empty()
+        && hw_device_summary != "No hardware devices connected."
+    {
+        system_prompt.push_str("\n## Connected Hardware Devices\n\n");
+        system_prompt.push_str(hw_device_summary);
+        system_prompt.push('\n');
+    }
 }
 
 /// Build the tool instruction block for the system prompt so the LLM knows
@@ -1327,108 +1339,113 @@ pub async fn run(
 
     // ── Build system prompt from workspace MD files (OpenClaw framework) ──
     let skills = crate::skills::load_skills(&config.workspace_dir);
-    let mut tool_descs: Vec<(&str, &str)> = vec![
+    let tools_name_set: std::collections::HashSet<String> =
+        tools_registry.iter().map(|t| t.name().to_string()).collect();
+    let mut tool_descs: Vec<(String, String)> = vec![
         (
-            "shell",
-            "Execute terminal commands. Use when: running local checks, build/test commands, diagnostics. Don't use when: a safer dedicated tool exists, or command is destructive without approval.",
+            "shell".into(),
+            "Execute terminal commands. Use when: running local checks, build/test commands, diagnostics. Don't use when: a safer dedicated tool exists, or command is destructive without approval.".into(),
         ),
         (
-            "file_read",
-            "Read file contents. Use when: inspecting project files, configs, logs. Don't use when: a targeted search is enough.",
+            "file_read".into(),
+            "Read file contents. Use when: inspecting project files, configs, logs. Don't use when: a targeted search is enough.".into(),
         ),
         (
-            "file_write",
-            "Write file contents. Use when: applying focused edits, scaffolding files, updating docs/code. Don't use when: side effects are unclear or file ownership is uncertain.",
+            "file_write".into(),
+            "Write file contents. Use when: applying focused edits, scaffolding files, updating docs/code. Don't use when: side effects are unclear or file ownership is uncertain.".into(),
         ),
         (
-            "memory_store",
-            "Save to memory. Use when: preserving durable preferences, decisions, key context. Don't use when: information is transient/noisy/sensitive without need.",
+            "memory_store".into(),
+            "Save to memory. Use when: preserving durable preferences, decisions, key context. Don't use when: information is transient/noisy/sensitive without need.".into(),
         ),
         (
-            "memory_recall",
-            "Search memory. Use when: retrieving prior decisions, user preferences, historical context. Don't use when: answer is already in current context.",
+            "memory_recall".into(),
+            "Search memory. Use when: retrieving prior decisions, user preferences, historical context. Don't use when: answer is already in current context.".into(),
         ),
         (
-            "memory_forget",
-            "Delete a memory entry. Use when: memory is incorrect/stale or explicitly requested for removal. Don't use when: impact is uncertain.",
+            "memory_forget".into(),
+            "Delete a memory entry. Use when: memory is incorrect/stale or explicitly requested for removal. Don't use when: impact is uncertain.".into(),
         ),
     ];
     tool_descs.push((
-        "cron_add",
-        "Create a cron job. Supports schedule kinds: cron, at, every; and job types: shell or agent.",
+        "cron_add".into(),
+        "Create a cron job. Supports schedule kinds: cron, at, every; and job types: shell or agent.".into(),
     ));
     tool_descs.push((
-        "cron_list",
-        "List all cron jobs with schedule, status, and metadata.",
+        "cron_list".into(),
+        "List all cron jobs with schedule, status, and metadata.".into(),
     ));
-    tool_descs.push(("cron_remove", "Remove a cron job by job_id."));
+    tool_descs.push(("cron_remove".into(), "Remove a cron job by job_id.".into()));
     tool_descs.push((
-        "cron_update",
-        "Patch a cron job (schedule, enabled, command/prompt, model, delivery, session_target).",
-    ));
-    tool_descs.push((
-        "cron_run",
-        "Force-run a cron job immediately and record a run history entry.",
-    ));
-    tool_descs.push(("cron_runs", "Show recent run history for a cron job."));
-    tool_descs.push((
-        "screenshot",
-        "Capture a screenshot of the current screen. Returns file path and base64-encoded PNG. Use when: visual verification, UI inspection, debugging displays.",
+        "cron_update".into(),
+        "Patch a cron job (schedule, enabled, command/prompt, model, delivery, session_target).".into(),
     ));
     tool_descs.push((
-        "image_info",
-        "Read image file metadata (format, dimensions, size) and optionally base64-encode it. Use when: inspecting images, preparing visual data for analysis.",
+        "cron_run".into(),
+        "Force-run a cron job immediately and record a run history entry.".into(),
+    ));
+    tool_descs.push(("cron_runs".into(), "Show recent run history for a cron job.".into()));
+    tool_descs.push((
+        "screenshot".into(),
+        "Capture a screenshot of the current screen. Returns file path and base64-encoded PNG. Use when: visual verification, UI inspection, debugging displays.".into(),
+    ));
+    tool_descs.push((
+        "image_info".into(),
+        "Read image file metadata (format, dimensions, size) and optionally base64-encode it. Use when: inspecting images, preparing visual data for analysis.".into(),
     ));
     if config.browser.enabled {
         tool_descs.push((
-            "browser_open",
-            "Open approved HTTPS URLs in Brave Browser (allowlist-only, no scraping)",
+            "browser_open".into(),
+            "Open approved HTTPS URLs in Brave Browser (allowlist-only, no scraping)".into(),
         ));
     }
     if config.composio.enabled {
         tool_descs.push((
-            "composio",
-            "Execute actions on 1000+ apps via Composio (Gmail, Notion, GitHub, Slack, etc.). Use action='list' to discover, 'execute' to run (optionally with connected_account_id), 'connect' to OAuth.",
+            "composio".into(),
+            "Execute actions on 1000+ apps via Composio (Gmail, Notion, GitHub, Slack, etc.). Use action='list' to discover, 'execute' to run (optionally with connected_account_id), 'connect' to OAuth.".into(),
         ));
     }
     tool_descs.push((
-        "schedule",
-        "Manage scheduled tasks (create/list/get/cancel/pause/resume). Supports recurring cron and one-shot delays.",
+        "schedule".into(),
+        "Manage scheduled tasks (create/list/get/cancel/pause/resume). Supports recurring cron and one-shot delays.".into(),
     ));
     if !config.agents.is_empty() {
         tool_descs.push((
-            "delegate",
-            "Delegate a sub-task to a specialized agent. Use when: task needs different model/capability, or to parallelize work.",
+            "delegate".into(),
+            "Delegate a sub-task to a specialized agent. Use when: task needs different model/capability, or to parallelize work.".into(),
         ));
     }
     if config.peripherals.enabled && !config.peripherals.boards.is_empty() {
-        tool_descs.push((
-            "gpio_read",
-            "Read the current state of a GPIO pin (returns 0 or 1). Use when: checking sensor/button state, LED status.",
-        ));
-        tool_descs.push((
-            "gpio_write",
-            "Set a GPIO pin HIGH (1) or LOW (0). Use this to turn on/off LEDs and control output pins. Example: gpio_write(device=pico0, pin=25, value=1) turns on the Pico onboard LED.",
-        ));
-        tool_descs.push((
-            "arduino_upload",
-            "Upload agent-generated Arduino sketch. Use when: user asks for 'make a heart', 'blink pattern', or custom LED behavior on Arduino. You write the full .ino code; ZeroClaw compiles and uploads it. Pin 13 = built-in LED on Uno.",
-        ));
+        // Only advertise peripheral tools that are actually registered in the tools registry.
+        if tools_name_set.contains("gpio_read") {
+            tool_descs.push((
+                "gpio_read".into(),
+                "Read the current state of a GPIO pin (returns 0 or 1). Use when: checking sensor/button state, LED status.".into(),
+            ));
+        }
+        if tools_name_set.contains("gpio_write") {
+            tool_descs.push((
+                "gpio_write".into(),
+                "Set a GPIO pin HIGH (1) or LOW (0). Use this to turn on/off LEDs and control output pins. Example: gpio_write(device=pico0, pin=25, value=1) turns on the Pico onboard LED.".into(),
+            ));
+        }
+        if tools_name_set.contains("arduino_upload") {
+            tool_descs.push((
+                "arduino_upload".into(),
+                "Upload agent-generated Arduino sketch. Use when: user asks for 'make a heart', 'blink pattern', or custom LED behavior on Arduino. You write the full .ino code; ZeroClaw compiles and uploads it. Pin 13 = built-in LED on Uno.".into(),
+            ));
+        }
     }
 
     // ── Ensure hardware::boot() tools appear in tool_descs (even without peripherals config) ──
     {
-        let existing_desc_names: std::collections::HashSet<&str> =
-            tool_descs.iter().map(|(name, _)| *name).collect();
+        let existing_desc_names: std::collections::HashSet<String> =
+            tool_descs.iter().map(|(name, _)| name.clone()).collect();
         for tool in &tools_registry {
             if hw_added_tool_names.contains(&tool.name().to_string())
                 && !existing_desc_names.contains(tool.name())
             {
-                // Leak a &'static str from owned description so it lives long enough
-                // for the tool_descs Vec<(&str, &str)> lifetime.
-                let leaked_desc: &'static str = Box::leak(tool.description().to_string().into_boxed_str());
-                let leaked_name: &'static str = Box::leak(tool.name().to_string().into_boxed_str());
-                tool_descs.push((leaked_name, leaked_desc));
+                tool_descs.push((tool.name().to_string(), tool.description().to_string()));
             }
         }
     }
@@ -1438,23 +1455,20 @@ pub async fn run(
     } else {
         None
     };
+    let tool_descs_refs: Vec<(&str, &str)> = tool_descs
+        .iter()
+        .map(|(n, d)| (n.as_str(), d.as_str()))
+        .collect();
     let mut system_prompt = crate::channels::build_system_prompt(
         &config.workspace_dir,
         model_name,
-        &tool_descs,
+        &tool_descs_refs,
         &skills,
         Some(&config.identity),
         bootstrap_max_chars,
     );
 
-    // Inject hardware device summary if available
-    if !hw_device_summary.is_empty()
-        && hw_device_summary != "No hardware devices connected."
-    {
-        system_prompt.push_str("\n## Connected Hardware Devices\n\n");
-        system_prompt.push_str(&hw_device_summary);
-        system_prompt.push('\n');
-    }
+    append_hw_summary(&mut system_prompt, &hw_device_summary);
 
     // Append structured tool-use instructions with schemas
     system_prompt.push_str(&build_tool_instructions(&tools_registry));
@@ -1740,22 +1754,8 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
 
     // ── Hardware registry tools (Phase 4 ToolRegistry + plugins) ──
     let hw_boot = crate::hardware::boot(&config.peripherals).await?;
-    let hw_device_summary = hw_boot.device_summary.clone();
-    let mut hw_added_tool_names: Vec<String> = Vec::new();
-    if !hw_boot.tools.is_empty() {
-        let existing: std::collections::HashSet<String> =
-            tools_registry.iter().map(|t| t.name().to_string()).collect();
-        let new_hw_tools: Vec<Box<dyn Tool>> = hw_boot
-            .tools
-            .into_iter()
-            .filter(|t| !existing.contains(t.name()))
-            .collect();
-        if !new_hw_tools.is_empty() {
-            hw_added_tool_names = new_hw_tools.iter().map(|t| t.name().to_string()).collect();
-            tracing::info!(count = new_hw_tools.len(), "Hardware registry tools added (process_message)");
-            tools_registry.extend(new_hw_tools);
-        }
-    }
+    let (hw_device_summary, hw_added_tool_names) =
+        crate::hardware::merge_hardware_tools(&mut tools_registry, hw_boot);
 
     let provider_name = config.default_provider.as_deref().unwrap_or("openrouter");
     let model_name = config
@@ -1787,45 +1787,51 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         .collect();
 
     let skills = crate::skills::load_skills(&config.workspace_dir);
-    let mut tool_descs: Vec<(&str, &str)> = vec![
-        ("shell", "Execute terminal commands."),
-        ("file_read", "Read file contents."),
-        ("file_write", "Write file contents."),
-        ("memory_store", "Save to memory."),
-        ("memory_recall", "Search memory."),
-        ("memory_forget", "Delete a memory entry."),
-        ("screenshot", "Capture a screenshot."),
-        ("image_info", "Read image metadata."),
+    let tools_name_set: std::collections::HashSet<String> =
+        tools_registry.iter().map(|t| t.name().to_string()).collect();
+    let mut tool_descs: Vec<(String, String)> = vec![
+        ("shell".into(), "Execute terminal commands.".into()),
+        ("file_read".into(), "Read file contents.".into()),
+        ("file_write".into(), "Write file contents.".into()),
+        ("memory_store".into(), "Save to memory.".into()),
+        ("memory_recall".into(), "Search memory.".into()),
+        ("memory_forget".into(), "Delete a memory entry.".into()),
+        ("screenshot".into(), "Capture a screenshot.".into()),
+        ("image_info".into(), "Read image metadata.".into()),
     ];
     if config.browser.enabled {
-        tool_descs.push(("browser_open", "Open approved URLs in browser."));
+        tool_descs.push(("browser_open".into(), "Open approved URLs in browser.".into()));
     }
     if config.composio.enabled {
-        tool_descs.push(("composio", "Execute actions on 1000+ apps via Composio."));
+        tool_descs.push(("composio".into(), "Execute actions on 1000+ apps via Composio.".into()));
     }
     if config.peripherals.enabled && !config.peripherals.boards.is_empty() {
-        tool_descs.push(("gpio_read", "Read the current state of a GPIO pin (returns 0 or 1)."));
-        tool_descs.push((
-            "gpio_write",
-            "Set a GPIO pin HIGH (1) or LOW (0). Use this to turn on/off LEDs and control output pins.",
-        ));
-        tool_descs.push((
-            "arduino_upload",
-            "Upload Arduino sketch. Use for 'make a heart', custom patterns. You write full .ino code; ZeroClaw uploads it.",
-        ));
+        if tools_name_set.contains("gpio_read") {
+            tool_descs.push(("gpio_read".into(), "Read the current state of a GPIO pin (returns 0 or 1).".into()));
+        }
+        if tools_name_set.contains("gpio_write") {
+            tool_descs.push((
+                "gpio_write".into(),
+                "Set a GPIO pin HIGH (1) or LOW (0). Use this to turn on/off LEDs and control output pins.".into(),
+            ));
+        }
+        if tools_name_set.contains("arduino_upload") {
+            tool_descs.push((
+                "arduino_upload".into(),
+                "Upload Arduino sketch. Use for 'make a heart', custom patterns. You write full .ino code; ZeroClaw uploads it.".into(),
+            ));
+        }
     }
 
     // ── Ensure hardware::boot() tools appear in tool_descs ──
     {
-        let existing_desc_names: std::collections::HashSet<&str> =
-            tool_descs.iter().map(|(name, _)| *name).collect();
+        let existing_desc_names: std::collections::HashSet<String> =
+            tool_descs.iter().map(|(name, _)| name.clone()).collect();
         for tool in &tools_registry {
             if hw_added_tool_names.contains(&tool.name().to_string())
                 && !existing_desc_names.contains(tool.name())
             {
-                let leaked_desc: &'static str = Box::leak(tool.description().to_string().into_boxed_str());
-                let leaked_name: &'static str = Box::leak(tool.name().to_string().into_boxed_str());
-                tool_descs.push((leaked_name, leaked_desc));
+                tool_descs.push((tool.name().to_string(), tool.description().to_string()));
             }
         }
     }
@@ -1835,23 +1841,20 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
     } else {
         None
     };
+    let tool_descs_refs: Vec<(&str, &str)> = tool_descs
+        .iter()
+        .map(|(n, d)| (n.as_str(), d.as_str()))
+        .collect();
     let mut system_prompt = crate::channels::build_system_prompt(
         &config.workspace_dir,
         &model_name,
-        &tool_descs,
+        &tool_descs_refs,
         &skills,
         Some(&config.identity),
         bootstrap_max_chars,
     );
 
-    // Inject hardware device summary if available
-    if !hw_device_summary.is_empty()
-        && hw_device_summary != "No hardware devices connected."
-    {
-        system_prompt.push_str("\n## Connected Hardware Devices\n\n");
-        system_prompt.push_str(&hw_device_summary);
-        system_prompt.push('\n');
-    }
+    append_hw_summary(&mut system_prompt, &hw_device_summary);
 
     system_prompt.push_str(&build_tool_instructions(&tools_registry));
 
