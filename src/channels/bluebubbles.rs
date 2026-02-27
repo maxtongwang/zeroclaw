@@ -447,9 +447,10 @@ impl Channel for BlueBubblesChannel {
     }
 
     /// Verify the BlueBubbles server is reachable.
+    /// Uses `/api/v1/ping` — the lightest probe endpoint (matches OpenClaw).
     /// Authentication is via `?password=` query param.
     async fn health_check(&self) -> bool {
-        let url = self.api_url("/api/v1/server/info");
+        let url = self.api_url("/api/v1/ping");
         self.client
             .get(&url)
             .query(&[("password", &self.password)])
