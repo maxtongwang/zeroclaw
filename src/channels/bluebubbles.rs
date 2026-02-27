@@ -1,7 +1,7 @@
 use super::traits::{Channel, ChannelMessage, SendMessage};
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use uuid::Uuid;
 
 const FROM_ME_CACHE_MAX: usize = 500;
@@ -11,8 +11,38 @@ const FROM_ME_CACHE_MAX: usize = 500;
 struct FromMeCacheEntry {
     chat_guid: String,
     body: String,
-    #[allow(dead_code)]
     timestamp: u64,
+}
+
+/// Interior-mutable FIFO cache for `fromMe` messages.
+/// Uses a `VecDeque<String>` to track insertion order for correct eviction,
+/// and a `HashMap` for O(1) lookup.
+struct FromMeCache {
+    map: HashMap<String, FromMeCacheEntry>,
+    order: VecDeque<String>,
+}
+
+impl FromMeCache {
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn insert(&mut self, id: String, entry: FromMeCacheEntry) {
+        if self.map.len() >= FROM_ME_CACHE_MAX {
+            if let Some(oldest) = self.order.pop_front() {
+                self.map.remove(&oldest);
+            }
+        }
+        self.order.push_back(id.clone());
+        self.map.insert(id, entry);
+    }
+
+    fn get_body(&self, id: &str) -> Option<&str> {
+        self.map.get(id).map(|e| e.body.as_str())
+    }
 }
 
 /// BlueBubbles channel — uses the BlueBubbles REST API to send and receive
@@ -34,9 +64,8 @@ pub struct BlueBubblesChannel {
     allowed_senders: Vec<String>,
     client: reqwest::Client,
     /// Cache of recent `fromMe` messages keyed by message GUID.
-    /// Kept so the agent can resolve reply context (body/chat) when a user
-    /// replies to a message the bot sent.
-    from_me_cache: Mutex<HashMap<String, FromMeCacheEntry>>,
+    /// Used to inject reply context when the user replies to a bot message.
+    from_me_cache: Mutex<FromMeCache>,
 }
 
 impl BlueBubblesChannel {
@@ -46,7 +75,7 @@ impl BlueBubblesChannel {
             password,
             allowed_senders,
             client: reqwest::Client::new(),
-            from_me_cache: Mutex::new(HashMap::new()),
+            from_me_cache: Mutex::new(FromMeCache::new()),
         }
     }
 
@@ -213,14 +242,7 @@ impl BlueBubblesChannel {
         if message_id.is_empty() {
             return;
         }
-        let mut cache = self.from_me_cache.lock();
-        // Simple LRU eviction: remove the first (oldest) entry when full
-        if cache.len() >= FROM_ME_CACHE_MAX {
-            if let Some(oldest) = cache.keys().next().cloned() {
-                cache.remove(&oldest);
-            }
-        }
-        cache.insert(
+        self.from_me_cache.lock().insert(
             message_id.to_string(),
             FromMeCacheEntry {
                 chat_guid: chat_guid.to_string(),
@@ -228,6 +250,15 @@ impl BlueBubblesChannel {
                 timestamp,
             },
         );
+    }
+
+    /// Look up the body of a cached `fromMe` message by its GUID.
+    /// Used to inject reply context when a user replies to a bot message.
+    pub fn lookup_reply_context(&self, message_id: &str) -> Option<String> {
+        self.from_me_cache
+            .lock()
+            .get_body(message_id)
+            .map(|s| s.to_string())
     }
 
     /// Build the text content and attachment placeholder from a BB `data`
@@ -371,10 +402,23 @@ impl BlueBubblesChannel {
             .filter(|g| !g.is_empty())
             .unwrap_or_else(|| sender.clone());
 
-        let Some(content) = Self::extract_content(data) else {
+        let Some(mut content) = Self::extract_content(data) else {
             tracing::debug!("BlueBubbles: skipping empty message from {sender}");
             return messages;
         };
+
+        // If the user is replying to a bot message, inject the original body
+        // as context — matches OpenClaw's reply-context resolution.
+        let reply_guid = data
+            .get("replyMessage")
+            .and_then(|r| r.get("guid"))
+            .or_else(|| data.get("associatedMessageGuid"))
+            .and_then(|v| v.as_str());
+        if let Some(guid) = reply_guid {
+            if let Some(bot_body) = self.lookup_reply_context(guid) {
+                content = format!("[In reply to: {bot_body}]\n{content}");
+            }
+        }
 
         let timestamp = Self::extract_timestamp(data);
 
@@ -609,10 +653,10 @@ mod tests {
 
         let msgs = ch.parse_webhook_payload(&payload);
         assert!(msgs.is_empty(), "fromMe messages must not be processed");
-        // Verify it was cached
-        let cache = ch.from_me_cache.lock();
-        assert!(
-            cache.contains_key("p:0/sent"),
+        // Verify it was cached and is readable via lookup_reply_context
+        assert_eq!(
+            ch.lookup_reply_context("p:0/sent").as_deref(),
+            Some("My own message"),
             "fromMe message should be in reply cache"
         );
     }

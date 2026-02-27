@@ -4071,6 +4071,10 @@ pub struct BlueBubblesConfig {
     /// Allowed sender handles (phone numbers or Apple IDs) or "*" for all
     #[serde(default)]
     pub allowed_senders: Vec<String>,
+    /// Optional shared secret to authenticate inbound webhooks.
+    /// If set, incoming requests must include `Authorization: Bearer <secret>`.
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
 }
 
 impl ChannelConfig for BlueBubblesConfig {

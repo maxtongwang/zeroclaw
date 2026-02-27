@@ -310,6 +310,8 @@ pub struct AppState {
     /// Linq webhook signing secret for signature verification
     pub linq_signing_secret: Option<Arc<str>>,
     pub bluebubbles: Option<Arc<BlueBubblesChannel>>,
+    /// BlueBubbles inbound webhook secret for Bearer auth verification
+    pub bluebubbles_webhook_secret: Option<Arc<str>>,
     pub nextcloud_talk: Option<Arc<NextcloudTalkChannel>>,
     /// Nextcloud Talk webhook secret for signature verification
     pub nextcloud_talk_webhook_secret: Option<Arc<str>>,
@@ -518,6 +520,12 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
                 bb.allowed_senders.clone(),
             ))
         });
+    let bluebubbles_webhook_secret: Option<Arc<str>> = config
+        .channels_config
+        .bluebubbles
+        .as_ref()
+        .and_then(|bb| bb.webhook_secret.as_deref())
+        .map(Arc::from);
 
     // WATI channel (if configured)
     let wati_channel: Option<Arc<WatiChannel>> =
@@ -702,6 +710,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         linq: linq_channel,
         linq_signing_secret,
         bluebubbles: bluebubbles_channel,
+        bluebubbles_webhook_secret,
         nextcloud_talk: nextcloud_talk_channel,
         nextcloud_talk_webhook_secret,
         wati: wati_channel,
@@ -1696,6 +1705,7 @@ async fn handle_linq_webhook(
 /// POST /bluebubbles — incoming BlueBubbles iMessage webhook
 async fn handle_bluebubbles_webhook(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
     let Some(ref bluebubbles) = state.bluebubbles else {
@@ -1704,6 +1714,21 @@ async fn handle_bluebubbles_webhook(
             Json(serde_json::json!({"error": "BlueBubbles not configured"})),
         );
     };
+
+    // ── Security: verify Authorization: Bearer <webhook_secret> if configured ──
+    if let Some(ref expected) = state.bluebubbles_webhook_secret {
+        let provided = headers
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        if provided != Some(expected.as_ref()) {
+            tracing::warn!("BlueBubbles webhook auth failed (missing or invalid Bearer token)");
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            );
+        }
+    }
 
     // Parse JSON body
     let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
@@ -2162,6 +2187,7 @@ mod tests {
             linq: None,
             linq_signing_secret: None,
             bluebubbles: None,
+                bluebubbles_webhook_secret: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -2219,6 +2245,7 @@ mod tests {
             linq: None,
             linq_signing_secret: None,
             bluebubbles: None,
+                bluebubbles_webhook_secret: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -2262,6 +2289,7 @@ mod tests {
             linq: None,
             linq_signing_secret: None,
             bluebubbles: None,
+                bluebubbles_webhook_secret: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -2306,6 +2334,7 @@ mod tests {
             linq: None,
             linq_signing_secret: None,
             bluebubbles: None,
+                bluebubbles_webhook_secret: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -2776,6 +2805,7 @@ Reminder set successfully."#;
             linq: None,
             linq_signing_secret: None,
             bluebubbles: None,
+                bluebubbles_webhook_secret: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -2844,6 +2874,7 @@ Reminder set successfully."#;
             linq: None,
             linq_signing_secret: None,
             bluebubbles: None,
+                bluebubbles_webhook_secret: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -2895,6 +2926,7 @@ Reminder set successfully."#;
             linq: None,
             linq_signing_secret: None,
             bluebubbles: None,
+                bluebubbles_webhook_secret: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -2946,6 +2978,7 @@ Reminder set successfully."#;
             linq: None,
             linq_signing_secret: None,
             bluebubbles: None,
+                bluebubbles_webhook_secret: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -3001,6 +3034,7 @@ Reminder set successfully."#;
             linq: None,
             linq_signing_secret: None,
             bluebubbles: None,
+                bluebubbles_webhook_secret: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -3061,6 +3095,7 @@ Reminder set successfully."#;
             linq: None,
             linq_signing_secret: None,
             bluebubbles: None,
+                bluebubbles_webhook_secret: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -3143,6 +3178,7 @@ Reminder set successfully."#;
             linq: None,
             linq_signing_secret: None,
             bluebubbles: None,
+                bluebubbles_webhook_secret: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -3197,6 +3233,7 @@ Reminder set successfully."#;
             linq: None,
             linq_signing_secret: None,
             bluebubbles: None,
+                bluebubbles_webhook_secret: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -3256,6 +3293,7 @@ Reminder set successfully."#;
             linq: None,
             linq_signing_secret: None,
             bluebubbles: None,
+                bluebubbles_webhook_secret: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -3320,6 +3358,7 @@ Reminder set successfully."#;
             linq: None,
             linq_signing_secret: None,
             bluebubbles: None,
+                bluebubbles_webhook_secret: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -3380,6 +3419,7 @@ Reminder set successfully."#;
             linq: None,
             linq_signing_secret: None,
             bluebubbles: None,
+                bluebubbles_webhook_secret: None,
             nextcloud_talk: Some(channel),
             nextcloud_talk_webhook_secret: Some(Arc::from(secret)),
             wati: None,
@@ -3433,6 +3473,7 @@ Reminder set successfully."#;
             linq: None,
             linq_signing_secret: None,
             bluebubbles: None,
+                bluebubbles_webhook_secret: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -3485,6 +3526,7 @@ Reminder set successfully."#;
             linq: None,
             linq_signing_secret: None,
             bluebubbles: None,
+                bluebubbles_webhook_secret: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
