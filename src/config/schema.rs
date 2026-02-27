@@ -383,6 +383,7 @@ impl std::fmt::Debug for Config {
             self.channels_config.signal.is_some(),
             self.channels_config.whatsapp.is_some(),
             self.channels_config.linq.is_some(),
+            self.channels_config.bluebubbles.is_some(),
             self.channels_config.wati.is_some(),
             self.channels_config.nextcloud_talk.is_some(),
             self.channels_config.email.is_some(),
@@ -3461,6 +3462,8 @@ pub struct ChannelsConfig {
     pub whatsapp: Option<WhatsAppConfig>,
     /// Linq Partner API channel configuration.
     pub linq: Option<LinqConfig>,
+    /// BlueBubbles iMessage bridge channel configuration.
+    pub bluebubbles: Option<BlueBubblesConfig>,
     /// WATI WhatsApp Business API channel configuration.
     pub wati: Option<WatiConfig>,
     /// Nextcloud Talk bot channel configuration.
@@ -3529,6 +3532,10 @@ impl ChannelsConfig {
             (
                 Box::new(ConfigWrapper::new(self.linq.as_ref())),
                 self.linq.is_some(),
+            ),
+            (
+                Box::new(ConfigWrapper::new(self.bluebubbles.as_ref())),
+                self.bluebubbles.is_some(),
             ),
             (
                 Box::new(ConfigWrapper::new(self.wati.as_ref())),
@@ -3603,6 +3610,7 @@ impl Default for ChannelsConfig {
             signal: None,
             whatsapp: None,
             linq: None,
+            bluebubbles: None,
             wati: None,
             nextcloud_talk: None,
             email: None,
@@ -4047,6 +4055,30 @@ impl ChannelConfig for LinqConfig {
     }
     fn desc() -> &'static str {
         "iMessage/RCS/SMS via Linq API"
+    }
+}
+
+/// BlueBubbles iMessage bridge channel configuration.
+///
+/// BlueBubbles is a self-hosted macOS server that exposes iMessage via a
+/// REST API and webhook push notifications. See <https://bluebubbles.app>.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BlueBubblesConfig {
+    /// BlueBubbles server URL (e.g. `http://192.168.1.100:1234` or ngrok URL)
+    pub server_url: String,
+    /// BlueBubbles server password
+    pub password: String,
+    /// Allowed sender handles (phone numbers or Apple IDs) or "*" for all
+    #[serde(default)]
+    pub allowed_senders: Vec<String>,
+}
+
+impl ChannelConfig for BlueBubblesConfig {
+    fn name() -> &'static str {
+        "BlueBubbles"
+    }
+    fn desc() -> &'static str {
+        "iMessage via BlueBubbles self-hosted macOS server"
     }
 }
 
@@ -7575,6 +7607,7 @@ default_temperature = 0.7
                 signal: None,
                 whatsapp: None,
                 linq: None,
+                bluebubbles: None,
                 wati: None,
                 nextcloud_talk: None,
                 email: None,
@@ -8472,6 +8505,7 @@ allowed_users = ["@ops:matrix.org"]
             signal: None,
             whatsapp: None,
             linq: None,
+            bluebubbles: None,
             wati: None,
             nextcloud_talk: None,
             email: None,
@@ -8750,6 +8784,7 @@ channel_id = "C123"
                 allowed_numbers: vec!["+1".into()],
             }),
             linq: None,
+            bluebubbles: None,
             wati: None,
             nextcloud_talk: None,
             email: None,
