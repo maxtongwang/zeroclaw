@@ -66,7 +66,7 @@ impl WebFetchTool {
         Self {
             security,
             provider: if provider.is_empty() {
-                "fast_html2md".to_string()
+                "nanohtml2text".to_string()
             } else {
                 provider
             },
@@ -143,13 +143,16 @@ impl WebFetchTool {
         static NOISE_RES: OnceLock<Result<Vec<regex::Regex>, String>> = OnceLock::new();
         let regexes = NOISE_RES
             .get_or_init(|| {
-                ["script", "style", "nav", "header", "footer", "aside", "noscript", "form", "button"]
-                    .iter()
-                    .map(|tag| {
-                        regex::Regex::new(&format!(r"(?si)<{tag}[^>]*>.*?</{tag}>"))
-                            .map_err(|e| e.to_string())
-                    })
-                    .collect::<Result<Vec<_>, _>>()
+                [
+                    "script", "style", "nav", "header", "footer", "aside", "noscript", "form",
+                    "button",
+                ]
+                .iter()
+                .map(|tag| {
+                    regex::Regex::new(&format!(r"(?si)<{tag}[^>]*>.*?</{tag}>"))
+                        .map_err(|e| e.to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()
             })
             .as_ref()
             .map_err(|e| anyhow::anyhow!("noise regex init failed: {e}"))?;
