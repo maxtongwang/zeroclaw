@@ -384,6 +384,7 @@ impl std::fmt::Debug for Config {
             self.channels_config.whatsapp.is_some(),
             self.channels_config.linq.is_some(),
             self.channels_config.bluebubbles.is_some(),
+            self.channels_config.bluebubbles_personal.is_some(),
             self.channels_config.wati.is_some(),
             self.channels_config.nextcloud_talk.is_some(),
             self.channels_config.email.is_some(),
@@ -3464,6 +3465,8 @@ pub struct ChannelsConfig {
     pub linq: Option<LinqConfig>,
     /// BlueBubbles iMessage bridge channel configuration.
     pub bluebubbles: Option<BlueBubblesConfig>,
+    /// BlueBubbles personal iMessage bridge — listen-only (no LLM, no reply).
+    pub bluebubbles_personal: Option<BlueBubblesConfig>,
     /// WATI WhatsApp Business API channel configuration.
     pub wati: Option<WatiConfig>,
     /// Nextcloud Talk bot channel configuration.
@@ -3611,6 +3614,7 @@ impl Default for ChannelsConfig {
             whatsapp: None,
             linq: None,
             bluebubbles: None,
+            bluebubbles_personal: None,
             wati: None,
             nextcloud_talk: None,
             email: None,
@@ -7626,6 +7630,7 @@ default_temperature = 0.7
                 whatsapp: None,
                 linq: None,
                 bluebubbles: None,
+                bluebubbles_personal: None,
                 wati: None,
                 nextcloud_talk: None,
                 email: None,
@@ -8524,6 +8529,7 @@ allowed_users = ["@ops:matrix.org"]
             whatsapp: None,
             linq: None,
             bluebubbles: None,
+            bluebubbles_personal: None,
             wati: None,
             nextcloud_talk: None,
             email: None,
@@ -8803,6 +8809,7 @@ channel_id = "C123"
             }),
             linq: None,
             bluebubbles: None,
+            bluebubbles_personal: None,
             wati: None,
             nextcloud_talk: None,
             email: None,

@@ -312,6 +312,8 @@ pub struct AppState {
     pub bluebubbles: Option<Arc<BlueBubblesChannel>>,
     /// BlueBubbles inbound webhook secret for Bearer auth verification
     pub bluebubbles_webhook_secret: Option<Arc<str>>,
+    /// BlueBubbles personal endpoint — listen-only, no LLM, no reply
+    pub bluebubbles_personal: Option<Arc<BlueBubblesChannel>>,
     pub nextcloud_talk: Option<Arc<NextcloudTalkChannel>>,
     /// Nextcloud Talk webhook secret for signature verification
     pub nextcloud_talk_webhook_secret: Option<Arc<str>>,
@@ -527,6 +529,16 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .and_then(|bb| bb.webhook_secret.as_deref())
         .map(Arc::from);
 
+    // BlueBubbles personal channel — listen-only endpoint (if configured)
+    let bluebubbles_personal: Option<Arc<BlueBubblesChannel>> =
+        config.channels_config.bluebubbles_personal.as_ref().map(|bb| {
+            Arc::new(BlueBubblesChannel::new(
+                bb.server_url.clone(),
+                bb.password.clone(),
+                bb.allowed_senders.clone(),
+            ))
+        });
+
     // WATI channel (if configured)
     let wati_channel: Option<Arc<WatiChannel>> =
         config.channels_config.wati.as_ref().map(|wati_cfg| {
@@ -646,6 +658,9 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     if bluebubbles_channel.is_some() {
         println!("  POST /bluebubbles — BlueBubbles iMessage webhook");
     }
+    if bluebubbles_personal.is_some() {
+        println!("  POST /bluebubbles-personal — BlueBubbles personal iMessage (listen-only)");
+    }
     if wati_channel.is_some() {
         println!("  GET  /wati      — WATI webhook verification");
         println!("  POST /wati      — WATI message webhook");
@@ -711,6 +726,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         linq_signing_secret,
         bluebubbles: bluebubbles_channel,
         bluebubbles_webhook_secret,
+        bluebubbles_personal,
         nextcloud_talk: nextcloud_talk_channel,
         nextcloud_talk_webhook_secret,
         wati: wati_channel,
@@ -758,6 +774,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/whatsapp", post(handle_whatsapp_message))
         .route("/linq", post(handle_linq_webhook))
         .route("/bluebubbles", post(handle_bluebubbles_webhook))
+        .route("/bluebubbles-personal", post(handle_bluebubbles_personal_webhook))
         .route("/wati", get(handle_wati_verify))
         .route("/wati", post(handle_wati_webhook))
         .route("/nextcloud-talk", post(handle_nextcloud_talk_webhook))
@@ -1792,6 +1809,45 @@ async fn handle_bluebubbles_webhook(
     (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
 }
 
+/// POST /bluebubbles-personal — incoming personal iMessage webhook (listen-only, no reply)
+async fn handle_bluebubbles_personal_webhook(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let Some(ref bb) = state.bluebubbles_personal else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "BlueBubbles personal not configured"})),
+        );
+    };
+
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid JSON payload"})),
+        );
+    };
+
+    let messages = bb.parse_webhook_payload(&payload);
+
+    for msg in &messages {
+        tracing::info!(
+            "BB personal iMessage from {}: {}",
+            msg.sender,
+            truncate_with_ellipsis(&msg.content, 50)
+        );
+        if state.auto_save {
+            let key = format!("bb_personal_{}_{}", msg.sender, msg.id);
+            let _ = state
+                .mem
+                .store(&key, &msg.content, MemoryCategory::Conversation, None)
+                .await;
+        }
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+}
+
 /// GET /wati — WATI webhook verification (echoes hub.challenge)
 async fn handle_wati_verify(
     State(state): State<AppState>,
@@ -2188,6 +2244,7 @@ mod tests {
             linq_signing_secret: None,
             bluebubbles: None,
                 bluebubbles_webhook_secret: None,
+                bluebubbles_personal: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -2246,6 +2303,7 @@ mod tests {
             linq_signing_secret: None,
             bluebubbles: None,
                 bluebubbles_webhook_secret: None,
+                bluebubbles_personal: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -2290,6 +2348,7 @@ mod tests {
             linq_signing_secret: None,
             bluebubbles: None,
                 bluebubbles_webhook_secret: None,
+                bluebubbles_personal: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -2335,6 +2394,7 @@ mod tests {
             linq_signing_secret: None,
             bluebubbles: None,
                 bluebubbles_webhook_secret: None,
+                bluebubbles_personal: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -2806,6 +2866,7 @@ Reminder set successfully."#;
             linq_signing_secret: None,
             bluebubbles: None,
                 bluebubbles_webhook_secret: None,
+                bluebubbles_personal: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -2875,6 +2936,7 @@ Reminder set successfully."#;
             linq_signing_secret: None,
             bluebubbles: None,
                 bluebubbles_webhook_secret: None,
+                bluebubbles_personal: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -2927,6 +2989,7 @@ Reminder set successfully."#;
             linq_signing_secret: None,
             bluebubbles: None,
                 bluebubbles_webhook_secret: None,
+                bluebubbles_personal: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -2979,6 +3042,7 @@ Reminder set successfully."#;
             linq_signing_secret: None,
             bluebubbles: None,
                 bluebubbles_webhook_secret: None,
+                bluebubbles_personal: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -3035,6 +3099,7 @@ Reminder set successfully."#;
             linq_signing_secret: None,
             bluebubbles: None,
                 bluebubbles_webhook_secret: None,
+                bluebubbles_personal: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -3096,6 +3161,7 @@ Reminder set successfully."#;
             linq_signing_secret: None,
             bluebubbles: None,
                 bluebubbles_webhook_secret: None,
+                bluebubbles_personal: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -3179,6 +3245,7 @@ Reminder set successfully."#;
             linq_signing_secret: None,
             bluebubbles: None,
                 bluebubbles_webhook_secret: None,
+                bluebubbles_personal: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -3234,6 +3301,7 @@ Reminder set successfully."#;
             linq_signing_secret: None,
             bluebubbles: None,
                 bluebubbles_webhook_secret: None,
+                bluebubbles_personal: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -3294,6 +3362,7 @@ Reminder set successfully."#;
             linq_signing_secret: None,
             bluebubbles: None,
                 bluebubbles_webhook_secret: None,
+                bluebubbles_personal: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -3359,6 +3428,7 @@ Reminder set successfully."#;
             linq_signing_secret: None,
             bluebubbles: None,
                 bluebubbles_webhook_secret: None,
+                bluebubbles_personal: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -3474,6 +3544,7 @@ Reminder set successfully."#;
             linq_signing_secret: None,
             bluebubbles: None,
                 bluebubbles_webhook_secret: None,
+                bluebubbles_personal: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
@@ -3527,6 +3598,7 @@ Reminder set successfully."#;
             linq_signing_secret: None,
             bluebubbles: None,
                 bluebubbles_webhook_secret: None,
+                bluebubbles_personal: None,
             nextcloud_talk: None,
             nextcloud_talk_webhook_secret: None,
             wati: None,
