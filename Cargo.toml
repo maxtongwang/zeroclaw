@@ -242,7 +242,9 @@ panic = "abort"      # Reduce binary size
 
 [profile.release-fast]
 inherits = "release"
-codegen-units = 8    # Parallel codegen for faster builds on powerful machines (16GB+ RAM recommended)
+lto = false          # Skip fat LTO — enables sccache + parallel codegen
+codegen-units = 16   # Parallel codegen for faster builds on powerful machines (16GB+ RAM recommended)
+opt-level = 2        # Faster compile than "z"; still optimized
                      # Use: cargo build --profile release-fast
 
 [profile.dist]

@@ -520,6 +520,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
                 bb.server_url.clone(),
                 bb.password.clone(),
                 bb.allowed_senders.clone(),
+                bb.ignore_senders.clone(),
             ))
         });
     let bluebubbles_webhook_secret: Option<Arc<str>> = config
@@ -536,6 +537,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
                 bb.server_url.clone(),
                 bb.password.clone(),
                 bb.allowed_senders.clone(),
+                bb.ignore_senders.clone(),
             ))
         });
 
@@ -1836,6 +1838,10 @@ async fn handle_bluebubbles_personal_webhook(
     let messages = bb.parse_webhook_payload(&payload);
 
     for msg in &messages {
+        if bb.ignore_senders.iter().any(|s| s.eq_ignore_ascii_case(&msg.sender)) {
+            tracing::debug!("BB personal: ignoring message from {}", msg.sender);
+            continue;
+        }
         tracing::info!(
             "BB personal iMessage from {}: {}",
             msg.sender,

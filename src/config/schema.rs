@@ -4079,6 +4079,9 @@ pub struct BlueBubblesConfig {
     /// If set, incoming requests must include `Authorization: Bearer <secret>`.
     #[serde(default)]
     pub webhook_secret: Option<String>,
+    /// Sender handles to silently ignore (e.g. the bot's own Apple ID on the personal endpoint).
+    #[serde(default)]
+    pub ignore_senders: Vec<String>,
 }
 
 impl std::fmt::Debug for BlueBubblesConfig {

@@ -115,6 +115,7 @@ pub struct BlueBubblesChannel {
     server_url: String,
     password: String,
     allowed_senders: Vec<String>,
+    pub ignore_senders: Vec<String>,
     client: reqwest::Client,
     /// Cache of recent `fromMe` messages keyed by message GUID.
     /// Used to inject reply context when the user replies to a bot message.
@@ -125,11 +126,12 @@ pub struct BlueBubblesChannel {
 }
 
 impl BlueBubblesChannel {
-    pub fn new(server_url: String, password: String, allowed_senders: Vec<String>) -> Self {
+    pub fn new(server_url: String, password: String, allowed_senders: Vec<String>, ignore_senders: Vec<String>) -> Self {
         Self {
             server_url: server_url.trim_end_matches('/').to_string(),
             password,
             allowed_senders,
+            ignore_senders,
             client: reqwest::Client::new(),
             from_me_cache: Mutex::new(FromMeCache::new()),
             typing_handle: Mutex::new(None),
@@ -821,6 +823,7 @@ mod tests {
             "http://localhost:1234".into(),
             "test-password".into(),
             vec!["+1234567890".into()],
+            vec![],
         )
     }
 
@@ -829,6 +832,7 @@ mod tests {
             "http://localhost:1234".into(),
             "pw".into(),
             vec!["*".into()],
+            vec![],
         )
     }
 
@@ -855,7 +859,7 @@ mod tests {
     #[test]
     fn bluebubbles_sender_allowed_empty_list_allows_all() {
         // Empty allowlist = no restriction (matches OpenClaw behaviour)
-        let ch = BlueBubblesChannel::new("http://localhost:1234".into(), "pw".into(), vec![]);
+        let ch = BlueBubblesChannel::new("http://localhost:1234".into(), "pw".into(), vec![], vec![]);
         assert!(ch.is_sender_allowed("+1234567890"));
         assert!(ch.is_sender_allowed("anyone@example.com"));
     }
@@ -863,7 +867,7 @@ mod tests {
     #[test]
     fn bluebubbles_server_url_trailing_slash_trimmed() {
         let ch =
-            BlueBubblesChannel::new("http://localhost:1234/".into(), "pw".into(), vec!["*".into()]);
+            BlueBubblesChannel::new("http://localhost:1234/".into(), "pw".into(), vec!["*".into()], vec![]);
         assert_eq!(
             ch.api_url("/api/v1/server/info"),
             "http://localhost:1234/api/v1/server/info"
@@ -1131,6 +1135,7 @@ mod tests {
             "http://localhost:1234".into(),
             "pw".into(),
             vec!["user@example.com".into()],
+            vec![],
         );
         let payload = serde_json::json!({
             "type": "new-message",
