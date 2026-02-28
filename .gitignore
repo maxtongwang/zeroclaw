@@ -36,3 +36,6 @@ credentials.json
 
 # Nix
 result
+
+# Local test configs (may contain secrets)
+test-config.toml
