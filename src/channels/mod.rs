@@ -456,22 +456,36 @@ fn channel_delivery_instructions(channel_name: &str) -> Option<&'static str> {
              - Use tool results silently: answer the latest user message directly, and do not narrate delayed/internal tool execution bookkeeping.",
         ),
         "bluebubbles" => Some(
-            "When responding on iMessage, use these supported text styles:\n\
-             - **bold** — key terms, commands, section titles, important info\n\
-             - *italic* — emphasis, secondary info, definitions\n\
-             - ~~strikethrough~~ — corrections or things that no longer apply\n\
-             - __underline__ — titles, proper nouns, names\n\
-             - `code` — inline code, commands, technical terms (renders as bold)\n\
-             - # Heading — markdown headers render as bold text\n\
-             - Emoji — iMessage renders them natively; use naturally 🙌\n\
-             Message bubble effects (append to end of message, e.g. 'Congrats! [EFFECT:confetti]'):\n\
-             - [EFFECT:slam] [EFFECT:loud] [EFFECT:gentle] [EFFECT:invisible-ink]\n\
-             - [EFFECT:confetti] [EFFECT:balloons] [EFFECT:fireworks] [EFFECT:lasers]\n\
-             - [EFFECT:love] [EFFECT:celebration] [EFFECT:echo] [EFFECT:spotlight]\n\
-             Use effects sparingly, only when context warrants it.\n\
-             No markdown tables — use plain bullet lists with dashes instead.\n\
-             Be concise and conversational — iMessage is a chat interface.\n\
-             Use tool results silently: answer the latest user message directly, do not narrate tool execution.",
+            "You are responding on iMessage. Always complete your research before replying — use as many tool calls as needed to get a full, accurate answer.\n\
+             \n\
+             ## Getting real-time data\n\
+             For sports scores, weather, news, stock prices, or any live data:\n\
+             - Use web_fetch on a canonical source directly. Do NOT stop at web_search snippets if they lack the full answer.\n\
+             - Sports scores → fetch https://www.espn.com/nba/scoreboard or sport-specific ESPN page\n\
+             - Weather → fetch https://wttr.in/CityName or https://forecast.weather.gov\n\
+             - News → fetch the specific news URL from search results\n\
+             - If web_fetch fails on one URL, try another source. Do not give up after one attempt.\n\
+             - Always give the complete answer (all scores, full forecast, etc.) — not a partial summary.\n\
+             \n\
+             ## Text styles (iMessage native)\n\
+             - **bold** — key terms, scores, names, important info\n\
+             - *italic* — emphasis, secondary info\n\
+             - ~~strikethrough~~ — corrections or outdated info\n\
+             - __underline__ — titles, proper nouns\n\
+             - `code` — commands, technical terms (renders as bold)\n\
+             - # Heading — renders as bold\n\
+             - Emoji — use naturally 🏀\n\
+             \n\
+             ## Message effects (append to end, e.g. 'Great job! [EFFECT:confetti]')\n\
+             [EFFECT:slam] [EFFECT:loud] [EFFECT:gentle] [EFFECT:invisible-ink]\n\
+             [EFFECT:confetti] [EFFECT:balloons] [EFFECT:fireworks] [EFFECT:lasers]\n\
+             [EFFECT:love] [EFFECT:celebration] [EFFECT:echo] [EFFECT:spotlight]\n\
+             Use effects only when context clearly warrants it.\n\
+             \n\
+             ## Format rules\n\
+             - No markdown tables — use bullet lists with dashes\n\
+             - Keep replies conversational but complete — don't truncate results\n\
+             - Do not narrate tool execution or say what you're about to do — just do it and give the answer",
         ),
         _ => None,
     }
