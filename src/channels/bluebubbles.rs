@@ -65,6 +65,9 @@ pub struct BlueBubblesChannel {
     /// Cache of recent `fromMe` messages keyed by message GUID.
     /// Used to inject reply context when the user replies to a bot message.
     from_me_cache: Mutex<FromMeCache>,
+    /// Background task that periodically refreshes the typing indicator.
+    /// BB typing indicators expire in ~5 s; refreshed every 4 s.
+    typing_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl BlueBubblesChannel {
@@ -75,6 +78,7 @@ impl BlueBubblesChannel {
             allowed_senders,
             client: reqwest::Client::new(),
             from_me_cache: Mutex::new(FromMeCache::new()),
+            typing_handle: Mutex::new(None),
         }
     }
 
@@ -577,6 +581,42 @@ impl Channel for BlueBubblesChannel {
         let sanitized = crate::providers::sanitize_api_error(&error_body);
         tracing::error!("BlueBubbles send failed: {status} — {sanitized}");
         anyhow::bail!("BlueBubbles API error: {status}");
+    }
+
+    /// Send a typing indicator to the given chat GUID via the BB Private API.
+    /// BB typing indicators expire in ~5 s; this method spawns a background
+    /// loop that re-fires every 4 s so the indicator stays visible while the
+    /// LLM is processing.
+    async fn start_typing(&self, recipient: &str) -> anyhow::Result<()> {
+        self.stop_typing(recipient).await?;
+
+        let client = self.client.clone();
+        let server_url = self.server_url.clone();
+        let password = self.password.clone();
+        let chat_guid = urlencoding::encode(recipient).into_owned();
+
+        let handle = tokio::spawn(async move {
+            let url = format!("{server_url}/api/v1/chat/{chat_guid}/typing");
+            loop {
+                let _ = client
+                    .post(&url)
+                    .query(&[("password", &password)])
+                    .send()
+                    .await;
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            }
+        });
+
+        *self.typing_handle.lock() = Some(handle);
+        Ok(())
+    }
+
+    /// Stop the active typing indicator background loop.
+    async fn stop_typing(&self, _recipient: &str) -> anyhow::Result<()> {
+        if let Some(handle) = self.typing_handle.lock().take() {
+            handle.abort();
+        }
+        Ok(())
     }
 
     /// Keepalive placeholder — actual messages arrive via the `/bluebubbles` webhook.

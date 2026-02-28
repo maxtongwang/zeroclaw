@@ -1780,9 +1780,13 @@ async fn handle_bluebubbles_webhook(
                 .await;
         }
 
+        // Show typing indicator while the LLM processes
+        let _ = bluebubbles.start_typing(&msg.reply_target).await;
+
         // Call the LLM
         match run_gateway_chat_with_tools(&state, &msg.content).await {
             Ok(response) => {
+                let _ = bluebubbles.stop_typing(&msg.reply_target).await;
                 let safe_response =
                     sanitize_gateway_response(&response, state.tools_registry_exec.as_ref());
                 // Send reply via BlueBubbles
@@ -1794,6 +1798,7 @@ async fn handle_bluebubbles_webhook(
                 }
             }
             Err(e) => {
+                let _ = bluebubbles.stop_typing(&msg.reply_target).await;
                 tracing::error!("LLM error for BlueBubbles message: {e:#}");
                 let _ = bluebubbles
                     .send(&SendMessage::new(
