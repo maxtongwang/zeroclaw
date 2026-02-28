@@ -6,6 +6,60 @@ use uuid::Uuid;
 
 const FROM_ME_CACHE_MAX: usize = 500;
 
+/// Maps short effect names to full Apple `effectId` strings for BB Private API.
+const EFFECT_MAP: &[(&str, &str)] = &[
+    // Bubble effects
+    ("slam", "com.apple.MobileSMS.expressivesend.impact"),
+    ("loud", "com.apple.MobileSMS.expressivesend.loud"),
+    ("gentle", "com.apple.MobileSMS.expressivesend.gentle"),
+    ("invisible-ink", "com.apple.MobileSMS.expressivesend.invisibleink"),
+    ("invisible_ink", "com.apple.MobileSMS.expressivesend.invisibleink"),
+    ("invisibleink", "com.apple.MobileSMS.expressivesend.invisibleink"),
+    // Screen effects
+    ("echo", "com.apple.messages.effect.CKEchoEffect"),
+    ("spotlight", "com.apple.messages.effect.CKSpotlightEffect"),
+    ("balloons", "com.apple.messages.effect.CKHappyBirthdayEffect"),
+    ("confetti", "com.apple.messages.effect.CKConfettiEffect"),
+    ("love", "com.apple.messages.effect.CKHeartEffect"),
+    ("heart", "com.apple.messages.effect.CKHeartEffect"),
+    ("hearts", "com.apple.messages.effect.CKHeartEffect"),
+    ("lasers", "com.apple.messages.effect.CKLasersEffect"),
+    ("fireworks", "com.apple.messages.effect.CKFireworksEffect"),
+    ("celebration", "com.apple.messages.effect.CKSparklesEffect"),
+];
+
+/// Extract and resolve a `[EFFECT:name]` tag from the end of a message string.
+///
+/// Returns `(cleaned_text, Option<effect_id>)`. The `[EFFECT:…]` tag is stripped
+/// from the text regardless of whether the name resolves to a known effect ID.
+fn extract_effect(text: &str) -> (String, Option<String>) {
+    // Scan from end for the last [EFFECT:...] token
+    let trimmed = text.trim_end();
+    if let Some(start) = trimmed.rfind("[EFFECT:") {
+        let rest = &trimmed[start..];
+        if let Some(end) = rest.find(']') {
+            let tag_content = &rest[8..end]; // skip "[EFFECT:"
+            let cleaned = format!("{}{}", &trimmed[..start], &trimmed[start + end + 1..]);
+            let cleaned = cleaned.trim_end().to_string();
+            let name = tag_content.trim().to_lowercase();
+            let effect_id = EFFECT_MAP
+                .iter()
+                .find(|(k, _)| *k == name.as_str())
+                .map(|(_, v)| v.to_string())
+                .or_else(|| {
+                    // Pass through full Apple effect IDs directly
+                    if name.starts_with("com.apple.") {
+                        Some(tag_content.trim().to_string())
+                    } else {
+                        None
+                    }
+                });
+            return (cleaned, effect_id);
+        }
+    }
+    (text.to_string(), None)
+}
+
 /// A cached `fromMe` message — kept so reply context can be resolved when
 /// the other party replies to something the bot sent.
 struct FromMeCacheEntry {
@@ -478,53 +532,157 @@ fn flush_attributed_segment(
     out.push(serde_json::Value::Object(seg));
 }
 
-/// Convert Discord-style markdown to a BlueBubbles Private API `attributedBody` array.
+/// Convert markdown to a BlueBubbles Private API `attributedBody` array.
 ///
-/// Supported markers (paired toggles):
-/// - `**text**` → bold
-/// - `*text*`   → italic (single asterisk; checked after double)
-/// - `~~text~~` → strikethrough
-/// - `__text__` → underline (double underscore; single `_` passes through)
+/// Supported inline markers (paired toggles):
+/// - `**text**`  → bold
+/// - `*text*`    → italic (single asterisk; checked after double)
+/// - `~~text~~`  → strikethrough
+/// - `__text__`  → underline (double underscore)
+/// - `` `text` ``→ inline code → bold (backticks stripped from output)
 ///
-/// Markers may nest arbitrarily. Newlines and spaces are preserved verbatim.
-/// Unrecognised characters (backticks, single `_`, etc.) pass through unchanged.
+/// Block-level patterns:
+/// - ` ``` … ``` ` code fence → plain text; opening/closing fence lines stripped
+/// - `# ` / `## ` / `### ` at line start → bold until end of line; `#` prefix stripped
+///
+/// Newlines and spaces within text are preserved verbatim.
+/// Unrecognised characters (single `_`, etc.) pass through unchanged.
 fn markdown_to_attributed_body(text: &str) -> Vec<serde_json::Value> {
     let mut segments: Vec<serde_json::Value> = Vec::new();
     let mut buf = String::new();
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len();
     let mut i = 0;
-    let (mut bold, mut italic, mut strike, mut underline) = (false, false, false, false);
+    let mut bold = false;
+    let mut italic = false;
+    let mut strike = false;
+    let mut underline = false;
+    let mut code = false; // single backtick inline code → renders as bold
+    let mut header_bold = false; // active markdown header → bold until \n
+    let mut in_code_block = false; // inside ``` … ``` block → plain text
+    let mut at_line_start = true;
 
     while i < len {
         let c = chars[i];
         let next = chars.get(i + 1).copied();
+        let next2 = chars.get(i + 2).copied();
 
+        // Newline: flush header-bold segment, reset header state
+        if c == '\n' {
+            if header_bold {
+                flush_attributed_segment(&mut buf, true, italic, strike, underline, &mut segments);
+                header_bold = false;
+                buf.push('\n');
+                flush_attributed_segment(&mut buf, false, false, false, false, &mut segments);
+            } else {
+                buf.push('\n');
+            }
+            at_line_start = true;
+            i += 1;
+            continue;
+        }
+
+        // Inside a code block: only watch for closing ```
+        if in_code_block {
+            if c == '`' && next == Some('`') && next2 == Some('`') {
+                flush_attributed_segment(&mut buf, false, false, false, false, &mut segments);
+                in_code_block = false;
+                i += 3;
+                while i < len && chars[i] != '\n' {
+                    i += 1;
+                }
+                at_line_start = true;
+            } else {
+                buf.push(c);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Header marker at line start: #/##/### followed by a space
+        if at_line_start && c == '#' {
+            let mut j = i;
+            while j < len && chars[j] == '#' {
+                j += 1;
+            }
+            if j < len && chars[j] == ' ' {
+                flush_attributed_segment(
+                    &mut buf, bold || code, italic, strike, underline, &mut segments,
+                );
+                header_bold = true;
+                i = j + 1; // skip all # chars and the space
+                at_line_start = false;
+                continue;
+            }
+        }
+
+        at_line_start = false;
+        let eff_bold = bold || code || header_bold;
+
+        // Triple backtick: opening code fence
+        if c == '`' && next == Some('`') && next2 == Some('`') {
+            flush_attributed_segment(&mut buf, eff_bold, italic, strike, underline, &mut segments);
+            in_code_block = true;
+            i += 3;
+            // Skip language hint on the same line as opening fence
+            while i < len && chars[i] != '\n' {
+                i += 1;
+            }
+            if i < len {
+                i += 1; // skip the newline after the opening fence
+            }
+            at_line_start = true;
+            continue;
+        }
+
+        // Single backtick: inline code → bold
+        if c == '`' {
+            flush_attributed_segment(&mut buf, eff_bold, italic, strike, underline, &mut segments);
+            code = !code;
+            i += 1;
+            continue;
+        }
+
+        // **bold**
         if c == '*' && next == Some('*') {
-            flush_attributed_segment(&mut buf, bold, italic, strike, underline, &mut segments);
+            flush_attributed_segment(&mut buf, eff_bold, italic, strike, underline, &mut segments);
             bold = !bold;
             i += 2;
-        } else if c == '~' && next == Some('~') {
-            flush_attributed_segment(&mut buf, bold, italic, strike, underline, &mut segments);
+            continue;
+        }
+
+        // ~~strikethrough~~
+        if c == '~' && next == Some('~') {
+            flush_attributed_segment(&mut buf, eff_bold, italic, strike, underline, &mut segments);
             strike = !strike;
             i += 2;
-        } else if c == '_' && next == Some('_') {
-            flush_attributed_segment(&mut buf, bold, italic, strike, underline, &mut segments);
+            continue;
+        }
+
+        // __underline__
+        if c == '_' && next == Some('_') {
+            flush_attributed_segment(&mut buf, eff_bold, italic, strike, underline, &mut segments);
             underline = !underline;
             i += 2;
-        } else if c == '*' {
-            flush_attributed_segment(&mut buf, bold, italic, strike, underline, &mut segments);
+            continue;
+        }
+
+        // *italic*
+        if c == '*' {
+            flush_attributed_segment(&mut buf, eff_bold, italic, strike, underline, &mut segments);
             italic = !italic;
             i += 1;
-        } else {
-            buf.push(c);
-            i += 1;
+            continue;
         }
+
+        buf.push(c);
+        i += 1;
     }
 
-    flush_attributed_segment(&mut buf, bold, italic, strike, underline, &mut segments);
+    flush_attributed_segment(
+        &mut buf, bold || code || header_bold, italic, strike, underline, &mut segments,
+    );
 
-    // Ensure at least one segment (handles empty input)
     if segments.is_empty() {
         segments.push(serde_json::json!({ "string": "", "attributes": {} }));
     }
@@ -548,7 +706,9 @@ impl Channel for BlueBubblesChannel {
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
         let url = self.api_url("/api/v1/message/text");
 
-        let attributed = markdown_to_attributed_body(&message.content);
+        // Strip [EFFECT:name] tag from content before rendering
+        let (content_no_effect, effect_id) = extract_effect(&message.content);
+        let attributed = markdown_to_attributed_body(&content_no_effect);
 
         // Plain-text fallback: concatenate all segment strings (markers stripped)
         let plain: String = attributed
@@ -556,13 +716,20 @@ impl Channel for BlueBubblesChannel {
             .filter_map(|s| s.get("string").and_then(|v| v.as_str()))
             .collect();
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "chatGuid": message.recipient,
             "tempGuid": Uuid::new_v4().to_string(),
             "message": plain,
             "method": "private-api",
             "attributedBody": attributed,
         });
+
+        // Append effectId if present
+        if let Some(ref eid) = effect_id {
+            body.as_object_mut()
+                .unwrap()
+                .insert("effectId".into(), serde_json::Value::String(eid.clone()));
+        }
 
         let resp = self
             .client
@@ -1156,5 +1323,85 @@ mod tests {
             .filter_map(|s| s.get("string").and_then(|v| v.as_str()))
             .collect();
         assert_eq!(plain, "Say hello to everyone");
+    }
+
+    #[test]
+    fn attributed_body_inline_code_renders_as_bold() {
+        let segs = markdown_to_attributed_body("`cargo build`");
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0]["string"], "cargo build");
+        assert_eq!(segs[0]["attributes"]["bold"], true);
+    }
+
+    #[test]
+    fn attributed_body_inline_code_in_sentence() {
+        let segs = markdown_to_attributed_body("Run `cargo build` now");
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0]["string"], "Run ");
+        assert_eq!(segs[0]["attributes"], serde_json::json!({}));
+        assert_eq!(segs[1]["string"], "cargo build");
+        assert_eq!(segs[1]["attributes"]["bold"], true);
+        assert_eq!(segs[2]["string"], " now");
+        assert_eq!(segs[2]["attributes"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn attributed_body_header_bold() {
+        let segs = markdown_to_attributed_body("## Section");
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0]["string"], "Section");
+        assert_eq!(segs[0]["attributes"]["bold"], true);
+    }
+
+    #[test]
+    fn attributed_body_header_resets_after_newline() {
+        let segs = markdown_to_attributed_body("## Title\nBody text");
+        let title = segs
+            .iter()
+            .find(|s| s["string"].as_str() == Some("Title"))
+            .expect("Title segment missing");
+        assert_eq!(title["attributes"]["bold"], true);
+        // Body text must be plain (bold reset after \n)
+        let plain: String = segs
+            .iter()
+            .filter_map(|s| s["string"].as_str())
+            .filter(|s| s.contains("Body"))
+            .collect();
+        assert!(plain.contains("Body text"));
+        let body_seg = segs
+            .iter()
+            .find(|s| s["string"].as_str() == Some("Body text"))
+            .expect("Body text segment missing");
+        assert_eq!(body_seg["attributes"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn attributed_body_code_block_plain_fences_stripped() {
+        let segs = markdown_to_attributed_body("```\nhello world\n```");
+        // Content rendered plain; no segment should contain backticks
+        for seg in &segs {
+            assert!(
+                !seg["string"].as_str().unwrap_or("").contains("```"),
+                "Fence markers must not appear in segments: {seg}"
+            );
+        }
+        let all_text: String = segs
+            .iter()
+            .filter_map(|s| s["string"].as_str())
+            .collect();
+        assert!(all_text.contains("hello world"), "Code content must be preserved");
+    }
+
+    #[test]
+    fn attributed_body_code_block_with_language_hint() {
+        let segs = markdown_to_attributed_body("```rust\nfn main() {}\n```");
+        // "rust" language hint on opening fence line must be stripped
+        let all_text: String = segs
+            .iter()
+            .filter_map(|s| s["string"].as_str())
+            .collect();
+        assert!(!all_text.contains("```"), "Fence markers must not appear");
+        assert!(!all_text.contains("rust\n"), "Language hint must be stripped");
+        assert!(all_text.contains("fn main()"), "Code content must be preserved");
     }
 }

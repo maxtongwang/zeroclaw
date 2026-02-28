@@ -456,17 +456,22 @@ fn channel_delivery_instructions(channel_name: &str) -> Option<&'static str> {
              - Use tool results silently: answer the latest user message directly, and do not narrate delayed/internal tool execution bookkeeping.",
         ),
         "bluebubbles" => Some(
-            "When responding on iMessage:\n\
-             - Use **bold** for key terms, section titles, and important info\n\
-             - Use *italic* for emphasis and secondary info\n\
-             - Use ~~strikethrough~~ for corrections or things that no longer apply\n\
-             - Use __underline__ for titles or names\n\
-             - Use emoji naturally — iMessage renders them natively 🙌\n\
-             - No markdown headers (## etc.) — they won't render\n\
-             - No code blocks or backticks — they appear as literal characters\n\
-             - No markdown tables — use plain bullet lists with dashes\n\
-             - Be concise and conversational — iMessage is a chat interface\n\
-             - Use tool results silently: answer the latest user message directly, do not narrate tool execution.",
+            "When responding on iMessage, use these supported text styles:\n\
+             - **bold** — key terms, commands, section titles, important info\n\
+             - *italic* — emphasis, secondary info, definitions\n\
+             - ~~strikethrough~~ — corrections or things that no longer apply\n\
+             - __underline__ — titles, proper nouns, names\n\
+             - `code` — inline code, commands, technical terms (renders as bold)\n\
+             - # Heading — markdown headers render as bold text\n\
+             - Emoji — iMessage renders them natively; use naturally 🙌\n\
+             Message bubble effects (append to end of message, e.g. 'Congrats! [EFFECT:confetti]'):\n\
+             - [EFFECT:slam] [EFFECT:loud] [EFFECT:gentle] [EFFECT:invisible-ink]\n\
+             - [EFFECT:confetti] [EFFECT:balloons] [EFFECT:fireworks] [EFFECT:lasers]\n\
+             - [EFFECT:love] [EFFECT:celebration] [EFFECT:echo] [EFFECT:spotlight]\n\
+             Use effects sparingly, only when context warrants it.\n\
+             No markdown tables — use plain bullet lists with dashes instead.\n\
+             Be concise and conversational — iMessage is a chat interface.\n\
+             Use tool results silently: answer the latest user message directly, do not narrate tool execution.",
         ),
         _ => None,
     }
