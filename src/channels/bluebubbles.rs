@@ -12,13 +12,25 @@ const EFFECT_MAP: &[(&str, &str)] = &[
     ("slam", "com.apple.MobileSMS.expressivesend.impact"),
     ("loud", "com.apple.MobileSMS.expressivesend.loud"),
     ("gentle", "com.apple.MobileSMS.expressivesend.gentle"),
-    ("invisible-ink", "com.apple.MobileSMS.expressivesend.invisibleink"),
-    ("invisible_ink", "com.apple.MobileSMS.expressivesend.invisibleink"),
-    ("invisibleink", "com.apple.MobileSMS.expressivesend.invisibleink"),
+    (
+        "invisible-ink",
+        "com.apple.MobileSMS.expressivesend.invisibleink",
+    ),
+    (
+        "invisible_ink",
+        "com.apple.MobileSMS.expressivesend.invisibleink",
+    ),
+    (
+        "invisibleink",
+        "com.apple.MobileSMS.expressivesend.invisibleink",
+    ),
     // Screen effects
     ("echo", "com.apple.messages.effect.CKEchoEffect"),
     ("spotlight", "com.apple.messages.effect.CKSpotlightEffect"),
-    ("balloons", "com.apple.messages.effect.CKHappyBirthdayEffect"),
+    (
+        "balloons",
+        "com.apple.messages.effect.CKHappyBirthdayEffect",
+    ),
     ("confetti", "com.apple.messages.effect.CKConfettiEffect"),
     ("love", "com.apple.messages.effect.CKHeartEffect"),
     ("heart", "com.apple.messages.effect.CKHeartEffect"),
@@ -120,13 +132,19 @@ pub struct BlueBubblesChannel {
     /// Cache of recent `fromMe` messages keyed by message GUID.
     /// Used to inject reply context when the user replies to a bot message.
     from_me_cache: Mutex<FromMeCache>,
-    /// Background task that periodically refreshes the typing indicator.
-    /// BB typing indicators expire in ~5 s; refreshed every 4 s.
-    typing_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Per-recipient background tasks that periodically refresh typing indicators.
+    /// BB typing indicators expire in ~5 s; tasks refresh every 4 s.
+    /// Keyed by chat GUID so concurrent conversations don't cancel each other.
+    typing_handles: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 impl BlueBubblesChannel {
-    pub fn new(server_url: String, password: String, allowed_senders: Vec<String>, ignore_senders: Vec<String>) -> Self {
+    pub fn new(
+        server_url: String,
+        password: String,
+        allowed_senders: Vec<String>,
+        ignore_senders: Vec<String>,
+    ) -> Self {
         Self {
             server_url: server_url.trim_end_matches('/').to_string(),
             password,
@@ -134,8 +152,17 @@ impl BlueBubblesChannel {
             ignore_senders,
             client: reqwest::Client::new(),
             from_me_cache: Mutex::new(FromMeCache::new()),
-            typing_handle: Mutex::new(None),
+            typing_handles: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Check if a sender address is in the ignore list.
+    ///
+    /// Ignored senders are silently dropped before allowlist evaluation.
+    fn is_sender_ignored(&self, sender: &str) -> bool {
+        self.ignore_senders
+            .iter()
+            .any(|s| s == "*" || s.eq_ignore_ascii_case(sender))
     }
 
     /// Check if a sender address is allowed.
@@ -392,9 +419,9 @@ impl BlueBubblesChannel {
     ///     "guid": "p:0/...",
     ///     "text": "Hello!",
     ///     "isFromMe": false,
-    ///     "dateCreated": 1708987654321,
-    ///     "handle": { "address": "+1234567890" },
-    ///     "chats": [{ "guid": "iMessage;-;+1234567890", "style": 45 }],
+    ///     "dateCreated": 1_708_987_654_321,
+    ///     "handle": { "address": "+1_234_567_890" },
+    ///     "chats": [{ "guid": "iMessage;-;+1_234_567_890", "style": 45 }],
     ///     "attachments": []
     ///   }
     /// }
@@ -405,10 +432,7 @@ impl BlueBubblesChannel {
     pub fn parse_webhook_payload(&self, payload: &serde_json::Value) -> Vec<ChannelMessage> {
         let mut messages = Vec::new();
 
-        let event_type = payload
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("");
+        let event_type = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
         if event_type != "new-message" {
             tracing::debug!("BlueBubbles: skipping non-message event: {event_type}");
             return messages;
@@ -443,6 +467,11 @@ impl BlueBubblesChannel {
             tracing::debug!("BlueBubbles: skipping message with no sender");
             return messages;
         };
+
+        if self.is_sender_ignored(&sender) {
+            tracing::debug!("BlueBubbles: ignoring message from ignored sender: {sender}");
+            return messages;
+        }
 
         if !self.is_sender_allowed(&sender) {
             tracing::warn!(
@@ -527,10 +556,7 @@ fn flush_attributed_segment(
         "string".into(),
         serde_json::Value::String(std::mem::take(buf)),
     );
-    seg.insert(
-        "attributes".into(),
-        serde_json::Value::Object(attrs),
-    );
+    seg.insert("attributes".into(), serde_json::Value::Object(attrs));
     out.push(serde_json::Value::Object(seg));
 }
 
@@ -609,7 +635,12 @@ fn markdown_to_attributed_body(text: &str) -> Vec<serde_json::Value> {
             }
             if j < len && chars[j] == ' ' {
                 flush_attributed_segment(
-                    &mut buf, bold || code, italic, strike, underline, &mut segments,
+                    &mut buf,
+                    bold || code,
+                    italic,
+                    strike,
+                    underline,
+                    &mut segments,
                 );
                 header_bold = true;
                 i = j + 1; // skip all # chars and the space
@@ -682,7 +713,12 @@ fn markdown_to_attributed_body(text: &str) -> Vec<serde_json::Value> {
     }
 
     flush_attributed_segment(
-        &mut buf, bold || code || header_bold, italic, strike, underline, &mut segments,
+        &mut buf,
+        bold || code || header_bold,
+        italic,
+        strike,
+        underline,
+        &mut segments,
     );
 
     if segments.is_empty() {
@@ -703,7 +739,7 @@ impl Channel for BlueBubblesChannel {
     /// `~~strikethrough~~`, `__underline__`) to a BB `attributedBody` array.
     /// The plain `message` field carries marker-stripped text as a fallback.
     ///
-    /// `message.recipient` must be a chat GUID (e.g. `iMessage;-;+15551234567`).
+    /// `message.recipient` must be a chat GUID (e.g. `iMessage;-;+15_551_234_567`).
     /// Authentication is via `?password=` query param (not a Bearer header).
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
         let url = self.api_url("/api/v1/message/text");
@@ -776,13 +812,15 @@ impl Channel for BlueBubblesChannel {
             }
         });
 
-        *self.typing_handle.lock() = Some(handle);
+        self.typing_handles
+            .lock()
+            .insert(recipient.to_string(), handle);
         Ok(())
     }
 
-    /// Stop the active typing indicator background loop.
-    async fn stop_typing(&self, _recipient: &str) -> anyhow::Result<()> {
-        if let Some(handle) = self.typing_handle.lock().take() {
+    /// Stop the typing indicator background loop for the given recipient.
+    async fn stop_typing(&self, recipient: &str) -> anyhow::Result<()> {
+        if let Some(handle) = self.typing_handles.lock().remove(recipient) {
             handle.abort();
         }
         Ok(())
@@ -822,7 +860,7 @@ mod tests {
         BlueBubblesChannel::new(
             "http://localhost:1234".into(),
             "test-password".into(),
-            vec!["+1234567890".into()],
+            vec!["+1_234_567_890".into()],
             vec![],
         )
     }
@@ -845,29 +883,34 @@ mod tests {
     #[test]
     fn bluebubbles_sender_allowed_exact() {
         let ch = make_channel();
-        assert!(ch.is_sender_allowed("+1234567890"));
-        assert!(!ch.is_sender_allowed("+9876543210"));
+        assert!(ch.is_sender_allowed("+1_234_567_890"));
+        assert!(!ch.is_sender_allowed("+9_876_543_210"));
     }
 
     #[test]
     fn bluebubbles_sender_allowed_wildcard() {
         let ch = make_open_channel();
-        assert!(ch.is_sender_allowed("+1234567890"));
+        assert!(ch.is_sender_allowed("+1_234_567_890"));
         assert!(ch.is_sender_allowed("user@example.com"));
     }
 
     #[test]
     fn bluebubbles_sender_allowed_empty_list_allows_all() {
         // Empty allowlist = no restriction (matches OpenClaw behaviour)
-        let ch = BlueBubblesChannel::new("http://localhost:1234".into(), "pw".into(), vec![], vec![]);
-        assert!(ch.is_sender_allowed("+1234567890"));
+        let ch =
+            BlueBubblesChannel::new("http://localhost:1234".into(), "pw".into(), vec![], vec![]);
+        assert!(ch.is_sender_allowed("+1_234_567_890"));
         assert!(ch.is_sender_allowed("anyone@example.com"));
     }
 
     #[test]
     fn bluebubbles_server_url_trailing_slash_trimmed() {
-        let ch =
-            BlueBubblesChannel::new("http://localhost:1234/".into(), "pw".into(), vec!["*".into()], vec![]);
+        let ch = BlueBubblesChannel::new(
+            "http://localhost:1234/".into(),
+            "pw".into(),
+            vec!["*".into()],
+            vec![],
+        );
         assert_eq!(
             ch.api_url("/api/v1/server/info"),
             "http://localhost:1234/api/v1/server/info"
@@ -877,16 +920,16 @@ mod tests {
     #[test]
     fn bluebubbles_normalize_handle_strips_service_prefix() {
         assert_eq!(
-            BlueBubblesChannel::normalize_handle("iMessage:+1234567890"),
-            "+1234567890"
+            BlueBubblesChannel::normalize_handle("iMessage:+1_234_567_890"),
+            "+1_234_567_890"
         );
         assert_eq!(
-            BlueBubblesChannel::normalize_handle("sms:+1234567890"),
-            "+1234567890"
+            BlueBubblesChannel::normalize_handle("sms:+1_234_567_890"),
+            "+1_234_567_890"
         );
         assert_eq!(
-            BlueBubblesChannel::normalize_handle("auto:+1234567890"),
-            "+1234567890"
+            BlueBubblesChannel::normalize_handle("auto:+1_234_567_890"),
+            "+1_234_567_890"
         );
     }
 
@@ -907,9 +950,9 @@ mod tests {
                 "guid": "p:0/abc123",
                 "text": "Hello ZeroClaw!",
                 "isFromMe": false,
-                "dateCreated": 1708987654321_u64,
-                "handle": { "address": "+1234567890" },
-                "chats": [{ "guid": "iMessage;-;+1234567890", "style": 45 }],
+                "dateCreated": 1_708_987_654_321_u64,
+                "handle": { "address": "+1_234_567_890" },
+                "chats": [{ "guid": "iMessage;-;+1_234_567_890", "style": 45 }],
                 "attachments": []
             }
         });
@@ -917,11 +960,11 @@ mod tests {
         let msgs = ch.parse_webhook_payload(&payload);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].id, "p:0/abc123");
-        assert_eq!(msgs[0].sender, "+1234567890");
+        assert_eq!(msgs[0].sender, "+1_234_567_890");
         assert_eq!(msgs[0].content, "Hello ZeroClaw!");
-        assert_eq!(msgs[0].reply_target, "iMessage;-;+1234567890");
+        assert_eq!(msgs[0].reply_target, "iMessage;-;+1_234_567_890");
         assert_eq!(msgs[0].channel, "bluebubbles");
-        assert_eq!(msgs[0].timestamp, 1708987654); // ms → s
+        assert_eq!(msgs[0].timestamp, 1_708_987_654); // ms → s
     }
 
     #[test]
@@ -933,8 +976,8 @@ mod tests {
                 "guid": "p:0/def456",
                 "text": "Group message",
                 "isFromMe": false,
-                "dateCreated": 1708987654000_u64,
-                "handle": { "address": "+1111111111" },
+                "dateCreated": 1_708_987_654_000_u64,
+                "handle": { "address": "+1_111_111_111" },
                 "chats": [{ "guid": "iMessage;+;group-abc", "style": 43 }],
                 "attachments": []
             }
@@ -942,7 +985,7 @@ mod tests {
 
         let msgs = ch.parse_webhook_payload(&payload);
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].sender, "+1111111111");
+        assert_eq!(msgs[0].sender, "+1_111_111_111");
         assert_eq!(msgs[0].reply_target, "iMessage;+;group-abc");
     }
 
@@ -955,9 +998,9 @@ mod tests {
                 "guid": "p:0/sent",
                 "text": "My own message",
                 "isFromMe": true,
-                "dateCreated": 1708987654000_u64,
-                "handle": { "address": "+1234567890" },
-                "chats": [{ "guid": "iMessage;-;+1234567890", "style": 45 }],
+                "dateCreated": 1_708_987_654_000_u64,
+                "handle": { "address": "+1_234_567_890" },
+                "chats": [{ "guid": "iMessage;-;+1_234_567_890", "style": 45 }],
                 "attachments": []
             }
         });
@@ -993,9 +1036,9 @@ mod tests {
                 "guid": "p:0/spam",
                 "text": "Spam",
                 "isFromMe": false,
-                "dateCreated": 1708987654000_u64,
-                "handle": { "address": "+9999999999" },
-                "chats": [{ "guid": "iMessage;-;+9999999999", "style": 45 }],
+                "dateCreated": 1_708_987_654_000_u64,
+                "handle": { "address": "+9_999_999_999" },
+                "chats": [{ "guid": "iMessage;-;+9_999_999_999", "style": 45 }],
                 "attachments": []
             }
         });
@@ -1013,15 +1056,18 @@ mod tests {
                 "guid": "p:0/empty",
                 "text": "",
                 "isFromMe": false,
-                "dateCreated": 1708987654000_u64,
-                "handle": { "address": "+1234567890" },
-                "chats": [{ "guid": "iMessage;-;+1234567890", "style": 45 }],
+                "dateCreated": 1_708_987_654_000_u64,
+                "handle": { "address": "+1_234_567_890" },
+                "chats": [{ "guid": "iMessage;-;+1_234_567_890", "style": 45 }],
                 "attachments": []
             }
         });
 
         let msgs = ch.parse_webhook_payload(&payload);
-        assert!(msgs.is_empty(), "Empty text with no attachments should be skipped");
+        assert!(
+            msgs.is_empty(),
+            "Empty text with no attachments should be skipped"
+        );
     }
 
     #[test]
@@ -1032,14 +1078,14 @@ mod tests {
             "data": {
                 "guid": "p:0/img",
                 "isFromMe": false,
-                "dateCreated": 1708987654000_u64,
-                "handle": { "address": "+1234567890" },
-                "chats": [{ "guid": "iMessage;-;+1234567890", "style": 45 }],
+                "dateCreated": 1_708_987_654_000_u64,
+                "handle": { "address": "+1_234_567_890" },
+                "chats": [{ "guid": "iMessage;-;+1_234_567_890", "style": 45 }],
                 "attachments": [{
                     "guid": "att-guid",
                     "transferName": "photo.jpg",
                     "mimeType": "image/jpeg",
-                    "totalBytes": 102400
+                    "totalBytes": 102_400
                 }]
             }
         });
@@ -1057,14 +1103,14 @@ mod tests {
             "data": {
                 "guid": "p:0/doc",
                 "isFromMe": false,
-                "dateCreated": 1708987654000_u64,
-                "handle": { "address": "+1234567890" },
-                "chats": [{ "guid": "iMessage;-;+1234567890", "style": 45 }],
+                "dateCreated": 1_708_987_654_000_u64,
+                "handle": { "address": "+1_234_567_890" },
+                "chats": [{ "guid": "iMessage;-;+1_234_567_890", "style": 45 }],
                 "attachments": [{
                     "guid": "att-guid",
                     "transferName": "contract.pdf",
                     "mimeType": "application/pdf",
-                    "totalBytes": 204800
+                    "totalBytes": 204_800
                 }]
             }
         });
@@ -1083,9 +1129,9 @@ mod tests {
                 "guid": "p:0/mixed",
                 "text": "See attached",
                 "isFromMe": false,
-                "dateCreated": 1708987654000_u64,
-                "handle": { "address": "+1234567890" },
-                "chats": [{ "guid": "iMessage;-;+1234567890", "style": 45 }],
+                "dateCreated": 1_708_987_654_000_u64,
+                "handle": { "address": "+1_234_567_890" },
+                "chats": [{ "guid": "iMessage;-;+1_234_567_890", "style": 45 }],
                 "attachments": [{
                     "guid": "att-guid",
                     "transferName": "doc.pdf",
@@ -1109,8 +1155,8 @@ mod tests {
                 "guid": "p:0/nochats",
                 "text": "Hi",
                 "isFromMe": false,
-                "dateCreated": 1708987654000_u64,
-                "handle": { "address": "+1234567890" },
+                "dateCreated": 1_708_987_654_000_u64,
+                "handle": { "address": "+1_234_567_890" },
                 "chats": [],
                 "attachments": []
             }
@@ -1118,7 +1164,7 @@ mod tests {
 
         let msgs = ch.parse_webhook_payload(&payload);
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].reply_target, "+1234567890");
+        assert_eq!(msgs[0].reply_target, "+1_234_567_890");
     }
 
     #[test]
@@ -1143,7 +1189,7 @@ mod tests {
                 "guid": "p:0/email",
                 "text": "Hello via Apple ID",
                 "isFromMe": false,
-                "dateCreated": 1708987654000_u64,
+                "dateCreated": 1_708_987_654_000_u64,
                 "handle": { "address": "user@example.com" },
                 "chats": [{ "guid": "iMessage;-;user@example.com", "style": 45 }],
                 "attachments": []
@@ -1166,16 +1212,16 @@ mod tests {
                 "guid": "p:0/direct",
                 "text": "Hi",
                 "isFromMe": false,
-                "chatGuid": "iMessage;-;+1111111111",
-                "dateCreated": 1708987654000_u64,
-                "handle": { "address": "+1111111111" },
+                "chatGuid": "iMessage;-;+1_111_111_111",
+                "dateCreated": 1_708_987_654_000_u64,
+                "handle": { "address": "+1_111_111_111" },
                 "attachments": []
             }
         });
 
         let msgs = ch.parse_webhook_payload(&payload);
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].reply_target, "iMessage;-;+1111111111");
+        assert_eq!(msgs[0].reply_target, "iMessage;-;+1_111_111_111");
     }
 
     #[test]
@@ -1188,15 +1234,15 @@ mod tests {
                 "guid": "p:0/ts",
                 "text": "Hi",
                 "isFromMe": false,
-                "dateCreated": 1708987654_u64, // seconds
-                "handle": { "address": "+1234567890" },
-                "chats": [{ "guid": "iMessage;-;+1234567890" }],
+                "dateCreated": 1_708_987_654_u64, // seconds
+                "handle": { "address": "+1_234_567_890" },
+                "chats": [{ "guid": "iMessage;-;+1_234_567_890" }],
                 "attachments": []
             }
         });
 
         let msgs = ch.parse_webhook_payload(&payload);
-        assert_eq!(msgs[0].timestamp, 1708987654);
+        assert_eq!(msgs[0].timestamp, 1_708_987_654);
     }
 
     #[test]
@@ -1207,9 +1253,9 @@ mod tests {
             "data": {
                 "guid": "p:0/vid",
                 "isFromMe": false,
-                "dateCreated": 1708987654000_u64,
-                "handle": { "address": "+1234567890" },
-                "chats": [{ "guid": "iMessage;-;+1234567890" }],
+                "dateCreated": 1_708_987_654_000_u64,
+                "handle": { "address": "+1_234_567_890" },
+                "chats": [{ "guid": "iMessage;-;+1_234_567_890" }],
                 "attachments": [{ "mimeType": "video/mp4", "transferName": "clip.mp4" }]
             }
         });
@@ -1226,9 +1272,9 @@ mod tests {
             "data": {
                 "guid": "p:0/imgs",
                 "isFromMe": false,
-                "dateCreated": 1708987654000_u64,
-                "handle": { "address": "+1234567890" },
-                "chats": [{ "guid": "iMessage;-;+1234567890" }],
+                "dateCreated": 1_708_987_654_000_u64,
+                "handle": { "address": "+1_234_567_890" },
+                "chats": [{ "guid": "iMessage;-;+1_234_567_890" }],
                 "attachments": [
                     { "mimeType": "image/jpeg", "transferName": "a.jpg" },
                     { "mimeType": "image/png", "transferName": "b.png" }
@@ -1390,23 +1436,57 @@ mod tests {
                 "Fence markers must not appear in segments: {seg}"
             );
         }
-        let all_text: String = segs
-            .iter()
-            .filter_map(|s| s["string"].as_str())
-            .collect();
-        assert!(all_text.contains("hello world"), "Code content must be preserved");
+        let all_text: String = segs.iter().filter_map(|s| s["string"].as_str()).collect();
+        assert!(
+            all_text.contains("hello world"),
+            "Code content must be preserved"
+        );
     }
 
     #[test]
     fn attributed_body_code_block_with_language_hint() {
         let segs = markdown_to_attributed_body("```rust\nfn main() {}\n```");
         // "rust" language hint on opening fence line must be stripped
-        let all_text: String = segs
-            .iter()
-            .filter_map(|s| s["string"].as_str())
-            .collect();
+        let all_text: String = segs.iter().filter_map(|s| s["string"].as_str()).collect();
         assert!(!all_text.contains("```"), "Fence markers must not appear");
-        assert!(!all_text.contains("rust\n"), "Language hint must be stripped");
-        assert!(all_text.contains("fn main()"), "Code content must be preserved");
+        assert!(
+            !all_text.contains("rust\n"),
+            "Language hint must be stripped"
+        );
+        assert!(
+            all_text.contains("fn main()"),
+            "Code content must be preserved"
+        );
+    }
+
+    #[test]
+    fn bluebubbles_ignore_sender_exact() {
+        let ch = BlueBubblesChannel::new(
+            "http://localhost:1234".into(),
+            "pw".into(),
+            vec!["*".into()],
+            vec!["+1_999_000_0000".into()],
+        );
+        assert!(ch.is_sender_ignored("+1_999_000_0000"));
+        assert!(!ch.is_sender_ignored("+1_234_567_890"));
+    }
+
+    #[test]
+    fn bluebubbles_ignore_sender_takes_precedence_over_allowlist() {
+        // A sender in both ignore_senders and allowed_senders must be dropped.
+        let ch = BlueBubblesChannel::new(
+            "http://localhost:1234".into(),
+            "pw".into(),
+            vec!["+1_999_000_0000".into()],
+            vec!["+1_999_000_0000".into()],
+        );
+        assert!(ch.is_sender_ignored("+1_999_000_0000"));
+    }
+
+    #[test]
+    fn bluebubbles_ignore_sender_empty_list_ignores_nothing() {
+        let ch = make_open_channel(); // ignore_senders = []
+        assert!(!ch.is_sender_ignored("+1_234_567_890"));
+        assert!(!ch.is_sender_ignored("anyone@example.com"));
     }
 }

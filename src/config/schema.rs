@@ -4094,6 +4094,7 @@ impl std::fmt::Debug for BlueBubblesConfig {
                 "webhook_secret",
                 &self.webhook_secret.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("ignore_senders", &self.ignore_senders)
             .finish()
     }
 }
@@ -5624,6 +5625,30 @@ fn decrypt_channel_secrets(
             "config.channels_config.clawdtalk.webhook_secret",
         )?;
     }
+    if let Some(ref mut bluebubbles) = channels.bluebubbles {
+        decrypt_secret(
+            store,
+            &mut bluebubbles.password,
+            "config.channels_config.bluebubbles.password",
+        )?;
+        decrypt_optional_secret(
+            store,
+            &mut bluebubbles.webhook_secret,
+            "config.channels_config.bluebubbles.webhook_secret",
+        )?;
+    }
+    if let Some(ref mut bluebubbles_personal) = channels.bluebubbles_personal {
+        decrypt_secret(
+            store,
+            &mut bluebubbles_personal.password,
+            "config.channels_config.bluebubbles_personal.password",
+        )?;
+        decrypt_optional_secret(
+            store,
+            &mut bluebubbles_personal.webhook_secret,
+            "config.channels_config.bluebubbles_personal.webhook_secret",
+        )?;
+    }
     Ok(())
 }
 
@@ -5784,6 +5809,30 @@ fn encrypt_channel_secrets(
             store,
             &mut clawdtalk.webhook_secret,
             "config.channels_config.clawdtalk.webhook_secret",
+        )?;
+    }
+    if let Some(ref mut bluebubbles) = channels.bluebubbles {
+        encrypt_secret(
+            store,
+            &mut bluebubbles.password,
+            "config.channels_config.bluebubbles.password",
+        )?;
+        encrypt_optional_secret(
+            store,
+            &mut bluebubbles.webhook_secret,
+            "config.channels_config.bluebubbles.webhook_secret",
+        )?;
+    }
+    if let Some(ref mut bluebubbles_personal) = channels.bluebubbles_personal {
+        encrypt_secret(
+            store,
+            &mut bluebubbles_personal.password,
+            "config.channels_config.bluebubbles_personal.password",
+        )?;
+        encrypt_optional_secret(
+            store,
+            &mut bluebubbles_personal.webhook_secret,
+            "config.channels_config.bluebubbles_personal.webhook_secret",
         )?;
     }
     Ok(())
