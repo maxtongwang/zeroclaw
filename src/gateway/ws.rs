@@ -10,30 +10,39 @@
 //! ```
 
 use super::AppState;
-use crate::agent::loop_::{
-    build_shell_policy_instructions, build_tool_instructions_from_specs, run_tool_call_loop,
-};
-use crate::approval::ApprovalManager;
+use crate::agent::loop_::{build_shell_policy_instructions, build_tool_instructions_from_specs};
 use crate::providers::ChatMessage;
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        State, WebSocketUpgrade,
+        RawQuery, State, WebSocketUpgrade,
     },
     http::{header, HeaderMap},
     response::IntoResponse,
 };
+use uuid::Uuid;
 
 const EMPTY_WS_RESPONSE_FALLBACK: &str =
     "Tool execution completed, but the model returned no final text response. Please ask me to summarize the result.";
 
-fn sanitize_ws_response(response: &str, tools: &[Box<dyn crate::tools::Tool>]) -> String {
-    let sanitized = crate::channels::sanitize_channel_response(response, tools);
-    if sanitized.is_empty() && !response.trim().is_empty() {
-        "I encountered malformed tool-call output and could not produce a safe reply. Please try again."
-            .to_string()
-    } else {
-        sanitized
+fn sanitize_ws_response(
+    response: &str,
+    tools: &[Box<dyn crate::tools::Tool>],
+    leak_guard: &crate::config::OutboundLeakGuardConfig,
+) -> String {
+    match crate::channels::sanitize_channel_response(response, tools, leak_guard) {
+        crate::channels::ChannelSanitizationResult::Sanitized(sanitized) => {
+            if sanitized.is_empty() && !response.trim().is_empty() {
+                "I encountered malformed tool-call output and could not produce a safe reply. Please try again."
+                    .to_string()
+            } else {
+                sanitized
+            }
+        }
+        crate::channels::ChannelSanitizationResult::Blocked { .. } => {
+            "I blocked a draft response because it appeared to contain credential material. Please ask for a redacted summary."
+                .to_string()
+        }
     }
 }
 
@@ -97,8 +106,9 @@ fn finalize_ws_response(
     response: &str,
     history: &[ChatMessage],
     tools: &[Box<dyn crate::tools::Tool>],
+    leak_guard: &crate::config::OutboundLeakGuardConfig,
 ) -> String {
-    let sanitized = sanitize_ws_response(response, tools);
+    let sanitized = sanitize_ws_response(response, tools, leak_guard);
     if !sanitized.trim().is_empty() {
         return sanitized;
     }
@@ -156,15 +166,17 @@ fn build_ws_system_prompt(
 pub async fn handle_ws_chat(
     State(state): State<AppState>,
     headers: HeaderMap,
+    RawQuery(query): RawQuery,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     // Auth via Authorization header or websocket protocol token.
     if state.pairing.require_pairing() {
-        let token = extract_ws_bearer_token(&headers).unwrap_or_default();
+        let query_token = extract_query_token(query.as_deref());
+        let token = extract_ws_bearer_token(&headers, query_token.as_deref()).unwrap_or_default();
         if !state.pairing.is_authenticated(&token) {
             return (
                 axum::http::StatusCode::UNAUTHORIZED,
-                "Unauthorized — provide Authorization: Bearer <token> or Sec-WebSocket-Protocol: bearer.<token>",
+                "Unauthorized — provide Authorization: Bearer <token>, Sec-WebSocket-Protocol: bearer.<token>, or ?token=<token>",
             )
                 .into_response();
         }
@@ -177,6 +189,7 @@ pub async fn handle_ws_chat(
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
     // Maintain conversation history for this WebSocket session
     let mut history: Vec<ChatMessage> = Vec::new();
+    let ws_session_id = format!("ws_{}", Uuid::new_v4());
 
     // Build system prompt once for the session
     let system_prompt = {
@@ -191,11 +204,6 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
     // Add system message to history
     history.push(ChatMessage::system(&system_prompt));
-
-    let approval_manager = {
-        let config_guard = state.config.lock();
-        ApprovalManager::from_config(&config_guard.autonomy)
-    };
 
     while let Some(msg) = socket.recv().await {
         let msg = match msg {
@@ -261,10 +269,15 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         }));
 
         // Full agentic loop with tools (includes WASM skills, shell, memory, etc.)
-        match super::run_gateway_chat_with_tools(&state, &content).await {
+        match super::run_gateway_chat_with_tools(&state, &content, Some(&ws_session_id)).await {
             Ok(response) => {
-                let safe_response =
-                    finalize_ws_response(&response, &history, state.tools_registry_exec.as_ref());
+                let leak_guard_cfg = { state.config.lock().security.outbound_leak_guard.clone() };
+                let safe_response = finalize_ws_response(
+                    &response,
+                    &history,
+                    state.tools_registry_exec.as_ref(),
+                    &leak_guard_cfg,
+                );
                 // Add assistant response to history
                 history.push(ChatMessage::assistant(&safe_response));
 
@@ -301,7 +314,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     }
 }
 
-fn extract_ws_bearer_token(headers: &HeaderMap) -> Option<String> {
+fn extract_ws_bearer_token(headers: &HeaderMap, query_token: Option<&str>) -> Option<String> {
     if let Some(auth_header) = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -314,18 +327,37 @@ fn extract_ws_bearer_token(headers: &HeaderMap) -> Option<String> {
         }
     }
 
-    let offered = headers
+    if let Some(offered) = headers
         .get(header::SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|value| value.to_str().ok())?;
-
-    for protocol in offered.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-        if let Some(token) = protocol.strip_prefix("bearer.") {
-            if !token.trim().is_empty() {
-                return Some(token.trim().to_string());
+        .and_then(|value| value.to_str().ok())
+    {
+        for protocol in offered.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(token) = protocol.strip_prefix("bearer.") {
+                if !token.trim().is_empty() {
+                    return Some(token.trim().to_string());
+                }
             }
         }
     }
 
+    query_token
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn extract_query_token(raw_query: Option<&str>) -> Option<String> {
+    let query = raw_query?;
+    for kv in query.split('&') {
+        let mut parts = kv.splitn(2, '=');
+        if parts.next() != Some("token") {
+            continue;
+        }
+        let token = parts.next().unwrap_or("").trim();
+        if !token.is_empty() {
+            return Some(token.to_string());
+        }
+    }
     None
 }
 
@@ -349,7 +381,7 @@ mod tests {
         );
 
         assert_eq!(
-            extract_ws_bearer_token(&headers).as_deref(),
+            extract_ws_bearer_token(&headers, None).as_deref(),
             Some("from-auth-header")
         );
     }
@@ -363,7 +395,7 @@ mod tests {
         );
 
         assert_eq!(
-            extract_ws_bearer_token(&headers).as_deref(),
+            extract_ws_bearer_token(&headers, None).as_deref(),
             Some("protocol-token")
         );
     }
@@ -380,7 +412,39 @@ mod tests {
             HeaderValue::from_static("zeroclaw.v1, bearer."),
         );
 
-        assert!(extract_ws_bearer_token(&headers).is_none());
+        assert!(extract_ws_bearer_token(&headers, None).is_none());
+    }
+
+    #[test]
+    fn extract_ws_bearer_token_reads_query_token_fallback() {
+        let headers = HeaderMap::new();
+        assert_eq!(
+            extract_ws_bearer_token(&headers, Some("query-token")).as_deref(),
+            Some("query-token")
+        );
+    }
+
+    #[test]
+    fn extract_ws_bearer_token_prefers_protocol_over_query_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static("zeroclaw.v1, bearer.protocol-token"),
+        );
+
+        assert_eq!(
+            extract_ws_bearer_token(&headers, Some("query-token")).as_deref(),
+            Some("protocol-token")
+        );
+    }
+
+    #[test]
+    fn extract_query_token_reads_token_param() {
+        assert_eq!(
+            extract_query_token(Some("foo=1&token=query-token&bar=2")).as_deref(),
+            Some("query-token")
+        );
+        assert!(extract_query_token(Some("foo=1")).is_none());
     }
 
     struct MockScheduleTool;
@@ -421,7 +485,8 @@ mod tests {
 </tool_call>
 After"#;
 
-        let result = sanitize_ws_response(input, &[]);
+        let leak_guard = crate::config::OutboundLeakGuardConfig::default();
+        let result = sanitize_ws_response(input, &[], &leak_guard);
         let normalized = result
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -439,10 +504,25 @@ After"#;
 {"result":{"status":"scheduled"}}
 Reminder set successfully."#;
 
-        let result = sanitize_ws_response(input, &tools);
+        let leak_guard = crate::config::OutboundLeakGuardConfig::default();
+        let result = sanitize_ws_response(input, &tools, &leak_guard);
         assert_eq!(result, "Reminder set successfully.");
         assert!(!result.contains("\"name\":\"schedule\""));
         assert!(!result.contains("\"result\""));
+    }
+
+    #[test]
+    fn sanitize_ws_response_blocks_detected_credentials_when_configured() {
+        let tools: Vec<Box<dyn Tool>> = Vec::new();
+        let leak_guard = crate::config::OutboundLeakGuardConfig {
+            enabled: true,
+            action: crate::config::OutboundLeakGuardAction::Block,
+            sensitivity: 0.7,
+        };
+
+        let result =
+            sanitize_ws_response("Temporary key: AKIAABCDEFGHIJKLMNOP", &tools, &leak_guard);
+        assert!(result.contains("blocked a draft response"));
     }
 
     #[test]
@@ -479,7 +559,8 @@ Reminder set successfully."#;
             ),
         ];
 
-        let result = finalize_ws_response("", &history, &tools);
+        let leak_guard = crate::config::OutboundLeakGuardConfig::default();
+        let result = finalize_ws_response("", &history, &tools, &leak_guard);
         assert!(result.contains("Latest tool output:"));
         assert!(result.contains("Disk usage: 72%"));
         assert!(!result.contains("<tool_result"));
@@ -494,7 +575,8 @@ Reminder set successfully."#;
                 .to_string(),
         }];
 
-        let result = finalize_ws_response("", &history, &tools);
+        let leak_guard = crate::config::OutboundLeakGuardConfig::default();
+        let result = finalize_ws_response("", &history, &tools, &leak_guard);
         assert!(result.contains("Latest tool output:"));
         assert!(result.contains("/dev/disk3s1"));
     }
@@ -504,7 +586,8 @@ Reminder set successfully."#;
         let tools: Vec<Box<dyn Tool>> = vec![Box::new(MockScheduleTool)];
         let history = vec![ChatMessage::system("sys")];
 
-        let result = finalize_ws_response("", &history, &tools);
+        let leak_guard = crate::config::OutboundLeakGuardConfig::default();
+        let result = finalize_ws_response("", &history, &tools, &leak_guard);
         assert_eq!(result, EMPTY_WS_RESPONSE_FALLBACK);
     }
 }

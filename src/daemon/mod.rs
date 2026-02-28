@@ -227,26 +227,27 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
             {
                 Ok(output) => {
                     crate::health::mark_component_ok("heartbeat");
-                    let announcement = if output.trim().is_empty() {
-                        "heartbeat task executed".to_string()
-                    } else {
-                        output
-                    };
-                    if let Some((channel, target)) = &delivery {
-                        if let Err(e) = crate::cron::scheduler::deliver_announcement(
-                            &config,
-                            channel,
-                            target,
-                            &announcement,
-                        )
-                        .await
-                        {
-                            crate::health::mark_component_error(
-                                "heartbeat",
-                                format!("delivery failed: {e}"),
-                            );
-                            tracing::warn!("Heartbeat delivery failed: {e}");
+                    if let Some(announcement) = heartbeat_announcement_text(&output) {
+                        if let Some((channel, target)) = &delivery {
+                            if let Err(e) = crate::cron::scheduler::deliver_announcement(
+                                &config,
+                                channel,
+                                target,
+                                &announcement,
+                            )
+                            .await
+                            {
+                                crate::health::mark_component_error(
+                                    "heartbeat",
+                                    format!("delivery failed: {e}"),
+                                );
+                                tracing::warn!("Heartbeat delivery failed: {e}");
+                            }
                         }
+                    } else {
+                        tracing::debug!(
+                            "Heartbeat returned sentinel (NO_REPLY/HEARTBEAT_OK); skipping delivery"
+                        );
                     }
                 }
                 Err(e) => {
@@ -256,6 +257,25 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
             }
         }
     }
+}
+
+fn heartbeat_announcement_text(output: &str) -> Option<String> {
+    if crate::cron::scheduler::is_no_reply_sentinel(output) || is_heartbeat_ok_sentinel(output) {
+        return None;
+    }
+    if output.trim().is_empty() {
+        return Some("heartbeat task executed".to_string());
+    }
+    Some(output.to_string())
+}
+
+fn is_heartbeat_ok_sentinel(output: &str) -> bool {
+    const HEARTBEAT_OK: &str = "HEARTBEAT_OK";
+    output
+        .trim()
+        .get(..HEARTBEAT_OK.len())
+        .map(|prefix| prefix.eq_ignore_ascii_case(HEARTBEAT_OK))
+        .unwrap_or(false)
 }
 
 fn heartbeat_tasks_for_tick(
@@ -299,7 +319,8 @@ fn heartbeat_delivery_target(config: &Config) -> Result<Option<(String, String)>
 }
 
 fn validate_heartbeat_channel_config(config: &Config, channel: &str) -> Result<()> {
-    match channel.to_ascii_lowercase().as_str() {
+    let normalized = channel.to_ascii_lowercase();
+    match normalized.as_str() {
         "telegram" => {
             if config.channels_config.telegram.is_none() {
                 anyhow::bail!(
@@ -325,6 +346,19 @@ fn validate_heartbeat_channel_config(config: &Config, channel: &str) -> Result<(
             if config.channels_config.mattermost.is_none() {
                 anyhow::bail!(
                     "heartbeat.target is set to mattermost but channels_config.mattermost is not configured"
+                );
+            }
+        }
+        "whatsapp" | "whatsapp_web" => {
+            let wa = config.channels_config.whatsapp.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "heartbeat.target is set to {channel} but channels_config.whatsapp is not configured"
+                )
+            })?;
+
+            if normalized == "whatsapp_web" && wa.is_cloud_config() && !wa.is_web_config() {
+                anyhow::bail!(
+                    "heartbeat.target is set to whatsapp_web but channels_config.whatsapp is configured for cloud mode (set session_path for web mode)"
                 );
             }
         }
@@ -463,6 +497,7 @@ mod tests {
             draft_update_interval_ms: 1000,
             interrupt_on_new_message: false,
             mention_only: false,
+            ack_enabled: true,
             group_reply: None,
             base_url: None,
         });
@@ -540,6 +575,37 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_announcement_text_skips_no_reply_sentinel() {
+        assert!(heartbeat_announcement_text(" NO_reply ").is_none());
+    }
+
+    #[test]
+    fn heartbeat_announcement_text_skips_heartbeat_ok_sentinel() {
+        assert!(heartbeat_announcement_text(" heartbeat_ok ").is_none());
+    }
+
+    #[test]
+    fn heartbeat_announcement_text_skips_heartbeat_ok_prefix_case_insensitive() {
+        assert!(heartbeat_announcement_text(" heArTbEaT_oK - all clear ").is_none());
+    }
+
+    #[test]
+    fn heartbeat_announcement_text_uses_default_for_empty_output() {
+        assert_eq!(
+            heartbeat_announcement_text(" \n\t "),
+            Some("heartbeat task executed".to_string())
+        );
+    }
+
+    #[test]
+    fn heartbeat_announcement_text_keeps_regular_output() {
+        assert_eq!(
+            heartbeat_announcement_text("system nominal"),
+            Some("system nominal".to_string())
+        );
+    }
+
+    #[test]
     fn heartbeat_delivery_target_none_when_unset() {
         let config = Config::default();
         let target = heartbeat_delivery_target(&config).unwrap();
@@ -600,11 +666,55 @@ mod tests {
             draft_update_interval_ms: 1000,
             interrupt_on_new_message: false,
             mention_only: false,
+            ack_enabled: true,
             group_reply: None,
             base_url: None,
         });
 
         let target = heartbeat_delivery_target(&config).unwrap();
         assert_eq!(target, Some(("telegram".to_string(), "123456".to_string())));
+    }
+
+    #[test]
+    fn heartbeat_delivery_target_accepts_whatsapp_web_target_in_web_mode() {
+        let mut config = Config::default();
+        config.heartbeat.target = Some("whatsapp_web".into());
+        config.heartbeat.to = Some("+15551234567".into());
+        config.channels_config.whatsapp = Some(crate::config::schema::WhatsAppConfig {
+            access_token: None,
+            phone_number_id: None,
+            verify_token: None,
+            app_secret: None,
+            session_path: Some("~/.zeroclaw/state/whatsapp-web/session.db".into()),
+            pair_phone: None,
+            pair_code: None,
+            allowed_numbers: vec!["*".into()],
+        });
+
+        let target = heartbeat_delivery_target(&config).unwrap();
+        assert_eq!(
+            target,
+            Some(("whatsapp_web".to_string(), "+15551234567".to_string()))
+        );
+    }
+
+    #[test]
+    fn heartbeat_delivery_target_rejects_whatsapp_web_target_in_cloud_mode() {
+        let mut config = Config::default();
+        config.heartbeat.target = Some("whatsapp_web".into());
+        config.heartbeat.to = Some("+15551234567".into());
+        config.channels_config.whatsapp = Some(crate::config::schema::WhatsAppConfig {
+            access_token: Some("token".into()),
+            phone_number_id: Some("123456".into()),
+            verify_token: Some("verify".into()),
+            app_secret: None,
+            session_path: None,
+            pair_phone: None,
+            pair_code: None,
+            allowed_numbers: vec!["*".into()],
+        });
+
+        let err = heartbeat_delivery_target(&config).unwrap_err();
+        assert!(err.to_string().contains("configured for cloud mode"));
     }
 }

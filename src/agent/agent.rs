@@ -1,6 +1,7 @@
 use crate::agent::dispatcher::{
     NativeToolDispatcher, ParsedToolCall, ToolDispatcher, ToolExecutionResult, XmlToolDispatcher,
 };
+use crate::agent::loop_::detection::{DetectionVerdict, LoopDetectionConfig, LoopDetector};
 use crate::agent::memory_loader::{DefaultMemoryLoader, MemoryLoader};
 use crate::agent::prompt::{PromptContext, SystemPromptBuilder};
 use crate::agent::research;
@@ -557,8 +558,13 @@ impl Agent {
             .push(ConversationMessage::Chat(ChatMessage::user(enriched)));
 
         let effective_model = self.classify_model(user_message);
+        let mut loop_detector = LoopDetector::new(LoopDetectionConfig {
+            no_progress_threshold: self.config.loop_detection_no_progress_threshold,
+            ping_pong_cycles: self.config.loop_detection_ping_pong_cycles,
+            failure_streak_threshold: self.config.loop_detection_failure_streak,
+        });
 
-        for _ in 0..self.config.max_tool_iterations {
+        for iteration in 0..self.config.max_tool_iterations {
             let messages = self.tool_dispatcher.to_provider_messages(&self.history);
             let response = match self
                 .provider
@@ -613,9 +619,34 @@ impl Agent {
             });
 
             let results = self.execute_tools(&calls).await;
+
+            // ── Loop detection: record calls ─────────────────────
+            for (call, result) in calls.iter().zip(results.iter()) {
+                let args_sig =
+                    serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".into());
+                loop_detector.record_call(&call.name, &args_sig, &result.output, result.success);
+            }
+
             let formatted = self.tool_dispatcher.format_results(&results);
             self.history.push(formatted);
             self.trim_history();
+
+            // ── Loop detection: check verdict ────────────────────
+            match loop_detector.check() {
+                DetectionVerdict::Continue => {}
+                DetectionVerdict::InjectWarning(warning) => {
+                    self.history
+                        .push(ConversationMessage::Chat(ChatMessage::user(warning)));
+                }
+                DetectionVerdict::HardStop(reason) => {
+                    anyhow::bail!(
+                        "Agent stopped early due to detected loop pattern (iteration {}/{}): {}",
+                        iteration + 1,
+                        self.config.max_tool_iterations,
+                        reason
+                    );
+                }
+            }
         }
 
         anyhow::bail!(
@@ -745,6 +776,7 @@ mod tests {
                     tool_calls: vec![],
                     usage: None,
                     reasoning_content: None,
+                    quota_metadata: None,
                 });
             }
             Ok(guard.remove(0))
@@ -782,6 +814,7 @@ mod tests {
                     tool_calls: vec![],
                     usage: None,
                     reasoning_content: None,
+                    quota_metadata: None,
                 });
             }
             Ok(guard.remove(0))
@@ -821,6 +854,7 @@ mod tests {
                 tool_calls: vec![],
                 usage: None,
                 reasoning_content: None,
+                quota_metadata: None,
             }]),
         });
 
@@ -861,12 +895,14 @@ mod tests {
                     }],
                     usage: None,
                     reasoning_content: None,
+                    quota_metadata: None,
                 },
                 crate::providers::ChatResponse {
                     text: Some("done".into()),
                     tool_calls: vec![],
                     usage: None,
                     reasoning_content: None,
+                    quota_metadata: None,
                 },
             ]),
         });
@@ -908,6 +944,7 @@ mod tests {
                 tool_calls: vec![],
                 usage: None,
                 reasoning_content: None,
+                quota_metadata: None,
             }]),
             seen_models: seen_models.clone(),
         });

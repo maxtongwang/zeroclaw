@@ -7,6 +7,10 @@ on:
     branches: [dev, main]
     types: [opened, labeled, unlabeled]
 
+concurrency:
+  group: pr-auto-response-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
+
 permissions: {}
 
 env:
@@ -22,7 +26,7 @@ jobs:
       (github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'labeled' || github.event.action == 'unlabeled')) ||
       (github.event_name == 'pull_request_target' &&
       (github.event.action == 'labeled' || github.event.action == 'unlabeled'))
-    runs-on: [self-hosted, aws-india]
+    runs-on: ubuntu-22.04
     permissions:
       contents: read
       issues: write
@@ -41,7 +45,7 @@ jobs:
             await script({ github, context, core });
   first-interaction:
     if: github.event.action == 'opened'
-    runs-on: [self-hosted, aws-india]
+    runs-on: ubuntu-22.04
     permissions:
       issues: write
       pull-requests: write
@@ -72,7 +76,7 @@ jobs:
 
   labeled-routes:
     if: github.event.action == 'labeled'
-    runs-on: [self-hosted, aws-india]
+    runs-on: ubuntu-22.04
     permissions:
       contents: read
       issues: write

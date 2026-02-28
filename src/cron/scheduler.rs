@@ -1,8 +1,10 @@
 #[cfg(feature = "channel-lark")]
 use crate::channels::LarkChannel;
+#[cfg(feature = "channel-matrix")]
+use crate::channels::MatrixChannel;
 use crate::channels::{
-    Channel, DiscordChannel, EmailChannel, MattermostChannel, QQChannel, SendMessage, SlackChannel,
-    TelegramChannel,
+    Channel, DiscordChannel, EmailChannel, MattermostChannel, NapcatChannel, QQChannel,
+    SendMessage, SlackChannel, TelegramChannel, WhatsAppChannel,
 };
 use crate::config::Config;
 use crate::cron::{
@@ -21,6 +23,10 @@ use tokio::time::{self, Duration};
 const MIN_POLL_SECONDS: u64 = 5;
 const SHELL_JOB_TIMEOUT_SECS: u64 = 120;
 const SCHEDULER_COMPONENT: &str = "scheduler";
+
+pub(crate) fn is_no_reply_sentinel(output: &str) -> bool {
+    output.trim().eq_ignore_ascii_case("NO_REPLY")
+}
 
 pub async fn run(config: Config) -> Result<()> {
     let poll_secs = config.reliability.scheduler_poll_secs.max(MIN_POLL_SECONDS);
@@ -289,6 +295,13 @@ async fn deliver_if_configured(config: &Config, job: &CronJob, output: &str) -> 
     if !delivery.mode.eq_ignore_ascii_case("announce") {
         return Ok(());
     }
+    if is_no_reply_sentinel(output) {
+        tracing::debug!(
+            "Cron job '{}' returned NO_REPLY sentinel; skipping announce delivery",
+            job.id
+        );
+        return Ok(());
+    }
 
     let channel = delivery
         .channel
@@ -308,7 +321,8 @@ pub(crate) async fn deliver_announcement(
     target: &str,
     output: &str,
 ) -> Result<()> {
-    match channel.to_ascii_lowercase().as_str() {
+    let normalized = channel.to_ascii_lowercase();
+    match normalized.as_str() {
         "telegram" => {
             let tg = config
                 .channels_config
@@ -319,6 +333,7 @@ pub(crate) async fn deliver_announcement(
                 tg.bot_token.clone(),
                 tg.allowed_users.clone(),
                 tg.mention_only,
+                tg.ack_enabled,
             )
             .with_workspace_dir(config.workspace_dir.clone());
             channel.send(&SendMessage::new(output, target)).await?;
@@ -347,6 +362,7 @@ pub(crate) async fn deliver_announcement(
                 .ok_or_else(|| anyhow::anyhow!("slack channel not configured"))?;
             let channel = SlackChannel::new(
                 sl.bot_token.clone(),
+                sl.app_token.clone(),
                 sl.channel_id.clone(),
                 sl.allowed_users.clone(),
             );
@@ -381,6 +397,40 @@ pub(crate) async fn deliver_announcement(
                 qq.environment.clone(),
             );
             channel.send(&SendMessage::new(output, target)).await?;
+        }
+        "napcat" => {
+            let napcat_cfg = config
+                .channels_config
+                .napcat
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("napcat channel not configured"))?;
+            let channel = NapcatChannel::from_config(napcat_cfg.clone())?;
+            channel.send(&SendMessage::new(output, target)).await?;
+        }
+        "whatsapp_web" | "whatsapp" => {
+            let wa = config
+                .channels_config
+                .whatsapp
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("whatsapp channel not configured"))?;
+
+            // WhatsApp Web requires the connected channel instance from the
+            // channel runtime. Fall back to cloud mode if configured.
+            if let Some(live_channel) = crate::channels::get_live_channel("whatsapp") {
+                live_channel.send(&SendMessage::new(output, target)).await?;
+            } else if wa.is_cloud_config() {
+                let channel = WhatsAppChannel::new(
+                    wa.access_token.clone().unwrap_or_default(),
+                    wa.phone_number_id.clone().unwrap_or_default(),
+                    wa.verify_token.clone().unwrap_or_default(),
+                    wa.allowed_numbers.clone(),
+                );
+                channel.send(&SendMessage::new(output, target)).await?;
+            } else {
+                anyhow::bail!(
+                    "whatsapp_web delivery requires an active channels runtime session; start daemon/channels with whatsapp web enabled"
+                );
+            }
         }
         "lark" => {
             #[cfg(feature = "channel-lark")]
@@ -422,6 +472,30 @@ pub(crate) async fn deliver_announcement(
                 .ok_or_else(|| anyhow::anyhow!("email channel not configured"))?;
             let channel = EmailChannel::new(email.clone());
             channel.send(&SendMessage::new(output, target)).await?;
+        }
+        "matrix" => {
+            #[cfg(feature = "channel-matrix")]
+            {
+                // NOTE: uses the basic constructor without session hints (user_id/device_id).
+                // Plain (non-E2EE) Matrix rooms work fine. Encrypted-room delivery is not
+                // supported in cron mode; use start_channels for full E2EE listener sessions.
+                let mx = config
+                    .channels_config
+                    .matrix
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("matrix channel not configured"))?;
+                let channel = MatrixChannel::new(
+                    mx.homeserver.clone(),
+                    mx.access_token.clone(),
+                    mx.room_id.clone(),
+                    mx.allowed_users.clone(),
+                );
+                channel.send(&SendMessage::new(output, target)).await?;
+            }
+            #[cfg(not(feature = "channel-matrix"))]
+            {
+                anyhow::bail!("matrix delivery channel requires `channel-matrix` feature");
+            }
         }
         other => anyhow::bail!("unsupported delivery channel: {other}"),
     }
@@ -1104,5 +1178,59 @@ mod tests {
         };
         let err = deliver_if_configured(&config, &job, "x").await.unwrap_err();
         assert!(err.to_string().contains("unsupported delivery channel"));
+    }
+
+    #[tokio::test]
+    async fn deliver_if_configured_skips_no_reply_sentinel() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let mut job = test_job("echo ok");
+        job.delivery = DeliveryConfig {
+            mode: "announce".into(),
+            channel: Some("invalid".into()),
+            to: Some("target".into()),
+            best_effort: true,
+        };
+
+        assert!(deliver_if_configured(&config, &job, "  no_reply  ")
+            .await
+            .is_ok());
+    }
+
+    #[test]
+    fn no_reply_sentinel_matching_is_trimmed_and_case_insensitive() {
+        assert!(is_no_reply_sentinel("NO_REPLY"));
+        assert!(is_no_reply_sentinel("  no_reply  "));
+        assert!(!is_no_reply_sentinel("NO_REPLY please"));
+        assert!(!is_no_reply_sentinel(""));
+    }
+
+    #[tokio::test]
+    async fn deliver_if_configured_whatsapp_web_requires_live_session_in_web_mode() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(&tmp).await;
+        config.channels_config.whatsapp = Some(crate::config::schema::WhatsAppConfig {
+            access_token: None,
+            phone_number_id: None,
+            verify_token: None,
+            app_secret: None,
+            session_path: Some("~/.zeroclaw/state/whatsapp-web/session.db".into()),
+            pair_phone: None,
+            pair_code: None,
+            allowed_numbers: vec!["*".into()],
+        });
+
+        let mut job = test_job("echo ok");
+        job.delivery = DeliveryConfig {
+            mode: "announce".into(),
+            channel: Some("whatsapp_web".into()),
+            to: Some("+15551234567".into()),
+            best_effort: true,
+        };
+
+        let err = deliver_if_configured(&config, &job, "x").await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("requires an active channels runtime session"));
     }
 }
