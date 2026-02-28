@@ -455,6 +455,19 @@ fn channel_delivery_instructions(channel_name: &str) -> Option<&'static str> {
              - You can combine text and media in one response — text is sent first, then each attachment.\n\
              - Use tool results silently: answer the latest user message directly, and do not narrate delayed/internal tool execution bookkeeping.",
         ),
+        "bluebubbles" => Some(
+            "When responding on iMessage:\n\
+             - Use **bold** for key terms, section titles, and important info\n\
+             - Use *italic* for emphasis and secondary info\n\
+             - Use ~~strikethrough~~ for corrections or things that no longer apply\n\
+             - Use __underline__ for titles or names\n\
+             - Use emoji naturally — iMessage renders them natively 🙌\n\
+             - No markdown headers (## etc.) — they won't render\n\
+             - No code blocks or backticks — they appear as literal characters\n\
+             - No markdown tables — use plain bullet lists with dashes\n\
+             - Be concise and conversational — iMessage is a chat interface\n\
+             - Use tool results silently: answer the latest user message directly, do not narrate tool execution.",
+        ),
         _ => None,
     }
 }

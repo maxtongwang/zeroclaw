@@ -436,25 +436,128 @@ impl BlueBubblesChannel {
     }
 }
 
+/// Flush the current text buffer as one `attributedBody` segment.
+/// Clears `buf` via `std::mem::take` — no separate `clear()` needed.
+fn flush_attributed_segment(
+    buf: &mut String,
+    bold: bool,
+    italic: bool,
+    strike: bool,
+    underline: bool,
+    out: &mut Vec<serde_json::Value>,
+) {
+    if buf.is_empty() {
+        return;
+    }
+    let mut attrs = serde_json::Map::new();
+    if bold {
+        attrs.insert("bold".into(), serde_json::Value::Bool(true));
+    }
+    if italic {
+        attrs.insert("italic".into(), serde_json::Value::Bool(true));
+    }
+    if strike {
+        attrs.insert("strikethrough".into(), serde_json::Value::Bool(true));
+    }
+    if underline {
+        attrs.insert("underline".into(), serde_json::Value::Bool(true));
+    }
+    let mut seg = serde_json::Map::new();
+    seg.insert(
+        "string".into(),
+        serde_json::Value::String(std::mem::take(buf)),
+    );
+    seg.insert(
+        "attributes".into(),
+        serde_json::Value::Object(attrs),
+    );
+    out.push(serde_json::Value::Object(seg));
+}
+
+/// Convert Discord-style markdown to a BlueBubbles Private API `attributedBody` array.
+///
+/// Supported markers (paired toggles):
+/// - `**text**` → bold
+/// - `*text*`   → italic (single asterisk; checked after double)
+/// - `~~text~~` → strikethrough
+/// - `__text__` → underline (double underscore; single `_` passes through)
+///
+/// Markers may nest arbitrarily. Newlines and spaces are preserved verbatim.
+/// Unrecognised characters (backticks, single `_`, etc.) pass through unchanged.
+fn markdown_to_attributed_body(text: &str) -> Vec<serde_json::Value> {
+    let mut segments: Vec<serde_json::Value> = Vec::new();
+    let mut buf = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    let (mut bold, mut italic, mut strike, mut underline) = (false, false, false, false);
+
+    while i < len {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+
+        if c == '*' && next == Some('*') {
+            flush_attributed_segment(&mut buf, bold, italic, strike, underline, &mut segments);
+            bold = !bold;
+            i += 2;
+        } else if c == '~' && next == Some('~') {
+            flush_attributed_segment(&mut buf, bold, italic, strike, underline, &mut segments);
+            strike = !strike;
+            i += 2;
+        } else if c == '_' && next == Some('_') {
+            flush_attributed_segment(&mut buf, bold, italic, strike, underline, &mut segments);
+            underline = !underline;
+            i += 2;
+        } else if c == '*' {
+            flush_attributed_segment(&mut buf, bold, italic, strike, underline, &mut segments);
+            italic = !italic;
+            i += 1;
+        } else {
+            buf.push(c);
+            i += 1;
+        }
+    }
+
+    flush_attributed_segment(&mut buf, bold, italic, strike, underline, &mut segments);
+
+    // Ensure at least one segment (handles empty input)
+    if segments.is_empty() {
+        segments.push(serde_json::json!({ "string": "", "attributes": {} }));
+    }
+
+    segments
+}
+
 #[async_trait]
 impl Channel for BlueBubblesChannel {
     fn name(&self) -> &str {
         "bluebubbles"
     }
 
-    /// Send a message via the BlueBubbles REST API.
+    /// Send a message via the BlueBubbles REST API using the Private API for
+    /// rich text. Converts Discord-style markdown (`**bold**`, `*italic*`,
+    /// `~~strikethrough~~`, `__underline__`) to a BB `attributedBody` array.
+    /// The plain `message` field carries marker-stripped text as a fallback.
     ///
     /// `message.recipient` must be a chat GUID (e.g. `iMessage;-;+15551234567`).
-    /// Chat GUIDs are provided in the `reply_target` field of incoming messages.
-    ///
     /// Authentication is via `?password=` query param (not a Bearer header).
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
         let url = self.api_url("/api/v1/message/text");
 
+        let attributed = markdown_to_attributed_body(&message.content);
+
+        // Plain-text fallback: concatenate all segment strings (markers stripped)
+        let plain: String = attributed
+            .iter()
+            .filter_map(|s| s.get("string").and_then(|v| v.as_str()))
+            .collect();
+
         let body = serde_json::json!({
             "chatGuid": message.recipient,
             "tempGuid": Uuid::new_v4().to_string(),
-            "message": message.content,
+            "message": plain,
+            "method": "private-api",
+            "attributedBody": attributed,
         });
 
         let resp = self
@@ -923,5 +1026,95 @@ mod tests {
 
         let msgs = ch.parse_webhook_payload(&payload);
         assert_eq!(msgs[0].content, "<media:image> (2 images)");
+    }
+
+    // -- markdown_to_attributed_body tests --
+
+    #[test]
+    fn attributed_body_plain_text_no_markers() {
+        let segs = markdown_to_attributed_body("Hello world");
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0]["string"], "Hello world");
+        assert_eq!(segs[0]["attributes"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn attributed_body_bold() {
+        let segs = markdown_to_attributed_body("**bold**");
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0]["string"], "bold");
+        assert_eq!(segs[0]["attributes"]["bold"], true);
+        assert_eq!(segs[0]["attributes"]["italic"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn attributed_body_italic() {
+        let segs = markdown_to_attributed_body("*italic*");
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0]["string"], "italic");
+        assert_eq!(segs[0]["attributes"]["italic"], true);
+        assert_eq!(segs[0]["attributes"]["bold"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn attributed_body_strikethrough() {
+        let segs = markdown_to_attributed_body("~~strike~~");
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0]["string"], "strike");
+        assert_eq!(segs[0]["attributes"]["strikethrough"], true);
+    }
+
+    #[test]
+    fn attributed_body_underline() {
+        let segs = markdown_to_attributed_body("__under__");
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0]["string"], "under");
+        assert_eq!(segs[0]["attributes"]["underline"], true);
+    }
+
+    #[test]
+    fn attributed_body_mixed_three_segments() {
+        let segs = markdown_to_attributed_body("Hello **world** there");
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0]["string"], "Hello ");
+        assert_eq!(segs[0]["attributes"], serde_json::json!({}));
+        assert_eq!(segs[1]["string"], "world");
+        assert_eq!(segs[1]["attributes"]["bold"], true);
+        assert_eq!(segs[2]["string"], " there");
+        assert_eq!(segs[2]["attributes"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn attributed_body_nested_bold_italic() {
+        // "bold " (bold), "and italic" (bold+italic), " text" (bold)
+        let segs = markdown_to_attributed_body("**bold *and italic* text**");
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0]["string"], "bold ");
+        assert_eq!(segs[0]["attributes"]["bold"], true);
+        assert_eq!(segs[0]["attributes"]["italic"], serde_json::Value::Null);
+        assert_eq!(segs[1]["string"], "and italic");
+        assert_eq!(segs[1]["attributes"]["bold"], true);
+        assert_eq!(segs[1]["attributes"]["italic"], true);
+        assert_eq!(segs[2]["string"], " text");
+        assert_eq!(segs[2]["attributes"]["bold"], true);
+        assert_eq!(segs[2]["attributes"]["italic"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn attributed_body_empty_string() {
+        let segs = markdown_to_attributed_body("");
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0]["string"], "");
+    }
+
+    #[test]
+    fn attributed_body_plain_text_preserved_in_send_message_field() {
+        // Verify the plain-text fallback strips markers
+        let segs = markdown_to_attributed_body("Say **hello** to *everyone*");
+        let plain: String = segs
+            .iter()
+            .filter_map(|s| s.get("string").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(plain, "Say hello to everyone");
     }
 }
