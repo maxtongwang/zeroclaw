@@ -229,6 +229,9 @@ wasm-tools = ["dep:wasmtime", "dep:wasmtime-wasi"]
 # whatsapp-web = Native WhatsApp Web client with custom rusqlite storage backend
 whatsapp-web = ["dep:wa-rs", "dep:wa-rs-core", "dep:wa-rs-binary", "dep:wa-rs-proto", "dep:wa-rs-ureq-http", "dep:wa-rs-tokio-transport", "dep:serde-big-array", "dep:prost", "dep:qrcode"]
 
+[profile.dev]
+split-debuginfo = "unpacked"  # skip dsymutil on macOS; no effect on Linux/Windows
+
 [profile.release]
 opt-level = "z"      # Optimize for size
 lto = "fat"          # Maximum cross-crate optimization for smaller binaries
