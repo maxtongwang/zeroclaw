@@ -103,22 +103,28 @@ pub fn whisper_available() -> bool {
 }
 
 /// Resolve the `whisper` binary path by checking PATH and common install locations.
+///
+/// Result is cached after the first call so subsequent invocations (e.g. on
+/// every audio webhook) do not spawn a `which` subprocess each time.
 fn resolve_whisper_bin() -> Option<&'static str> {
-    const CANDIDATES: &[&str] = &[
-        "whisper",
-        "/opt/homebrew/bin/whisper",
-        "/usr/local/bin/whisper",
-    ];
-    CANDIDATES.iter().copied().find(|bin| {
-        if bin.starts_with('/') {
-            std::path::Path::new(bin).is_file()
-        } else {
-            std::process::Command::new("which")
-                .arg(bin)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        }
+    static WHISPER_BIN: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *WHISPER_BIN.get_or_init(|| {
+        const CANDIDATES: &[&str] = &[
+            "whisper",
+            "/opt/homebrew/bin/whisper",
+            "/usr/local/bin/whisper",
+        ];
+        CANDIDATES.iter().copied().find(|bin| {
+            if bin.starts_with('/') {
+                std::path::Path::new(bin).is_file()
+            } else {
+                std::process::Command::new("which")
+                    .arg(bin)
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+            }
+        })
     })
 }
 

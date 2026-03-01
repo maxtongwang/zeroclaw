@@ -471,7 +471,14 @@ impl BlueBubblesChannel {
     ///
     /// Uses `GET /api/v1/attachment/{guid}/download`. The attachment GUID is
     /// URL-encoded so `p:0/UUID`-style identifiers work as URL path segments.
+    ///
+    /// Enforces a 25 MB cap (matching the Groq Whisper API limit) both via the
+    /// `Content-Length` header (before buffering) and on the buffered body, to
+    /// prevent memory exhaustion from large or malicious attachments.
     async fn download_attachment_bytes(&self, attachment_guid: &str) -> anyhow::Result<Vec<u8>> {
+        /// 25 MB — matches `transcription::MAX_AUDIO_BYTES`.
+        const MAX_BYTES: usize = 25 * 1024 * 1024;
+
         let encoded = urlencoding::encode(attachment_guid);
         let url = self.api_url(&format!("/api/v1/attachment/{encoded}/download"));
         let resp = self
@@ -488,7 +495,20 @@ impl BlueBubblesChannel {
                 attachment_guid
             );
         }
-        Ok(resp.bytes().await?.to_vec())
+        // Reject before buffering when Content-Length already exceeds the cap.
+        if let Some(len) = resp.content_length() {
+            if usize::try_from(len).unwrap_or(usize::MAX) > MAX_BYTES {
+                anyhow::bail!("BB attachment too large ({len} bytes, max {MAX_BYTES})");
+            }
+        }
+        let bytes = resp.bytes().await?;
+        if bytes.len() > MAX_BYTES {
+            anyhow::bail!(
+                "BB attachment too large ({} bytes, max {MAX_BYTES})",
+                bytes.len()
+            );
+        }
+        Ok(bytes.to_vec())
     }
 
     /// Transcribe an audio attachment received via the BlueBubbles webhook.
@@ -530,10 +550,21 @@ impl BlueBubblesChannel {
             return Ok(Some(transcript));
         }
 
-        // Groq API fallback: note that raw CAF files are not accepted by the
-        // Groq API; BB typically serves the converted MP3 via the download
-        // endpoint, so this path usually works for iMessage voice memos.
+        // Groq API fallback: BB typically serves converted MP3 for iMessage
+        // voice memos, but raw CAF files are rejected by the Groq API. Give a
+        // clear error rather than the generic "Unsupported audio format" message.
         if let Some(ref config) = self.transcription {
+            if std::path::Path::new(&att.transfer_name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("caf"))
+                .unwrap_or(false)
+            {
+                anyhow::bail!(
+                    "CAF audio is not supported by the Groq API fallback — \
+                     install openai-whisper (`pip install openai-whisper`) for local transcription"
+                );
+            }
             let transcript =
                 super::transcription::transcribe_audio(bytes, &att.transfer_name, config).await?;
             if transcript.trim().is_empty() {
@@ -627,8 +658,22 @@ impl BlueBubblesChannel {
             2003 => "\u{1F602} Laughed at",        // 😂
             2004 => "\u{203C}\u{FE0F} Emphasized", // ‼️
             2005 => "\u{2753} Questioned",         // ❓
-            // 3000–3005 are removal tapbacks; silently ignore them.
-            _ => return vec![],
+            // 3000–3005 are removal tapbacks; ignore silently.
+            3000..=3005 => return vec![],
+            // 0 indicates a non-tapback updated-message (read receipt, delivery, etc.).
+            0 => {
+                tracing::debug!(
+                    "BlueBubbles: updated-message is not a tapback (associatedMessageType=0)"
+                );
+                return vec![];
+            }
+            // Unknown types may indicate a new BB API version; log for diagnosis.
+            _ => {
+                tracing::debug!(
+                    "BlueBubbles: unknown associatedMessageType {associated_type}, skipping"
+                );
+                return vec![];
+            }
         };
 
         let is_from_me = data
@@ -1078,7 +1123,7 @@ impl Channel for BlueBubblesChannel {
         // Append effectId if present
         if let Some(ref eid) = effect_id {
             body.as_object_mut()
-                .unwrap()
+                .expect("serde_json::json!({}) always produces an object")
                 .insert("effectId".into(), serde_json::Value::String(eid.clone()));
         }
 
@@ -1201,6 +1246,9 @@ impl Channel for BlueBubblesChannel {
             return Ok(());
         }
         let status = resp.status();
+        let error_body = resp.text().await.unwrap_or_default();
+        let sanitized = crate::providers::sanitize_api_error(&error_body);
+        tracing::error!("BlueBubbles add_reaction failed: {status} — {sanitized}");
         anyhow::bail!("BlueBubbles tapback failed: {status}");
     }
 
@@ -1238,6 +1286,9 @@ impl Channel for BlueBubblesChannel {
             return Ok(());
         }
         let status = resp.status();
+        let error_body = resp.text().await.unwrap_or_default();
+        let sanitized = crate::providers::sanitize_api_error(&error_body);
+        tracing::error!("BlueBubbles remove_reaction failed: {status} — {sanitized}");
         anyhow::bail!("BlueBubbles remove tapback failed: {status}");
     }
 }
