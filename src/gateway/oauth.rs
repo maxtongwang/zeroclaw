@@ -629,11 +629,12 @@ mod tests {
     #[test]
     fn html_escape_sanitizes_special_chars() {
         let escaped = html_escape("<script>&\"</script>");
+        // Raw angle-brackets, quotes must not appear as literal characters.
         assert!(!escaped.contains('<'));
         assert!(!escaped.contains('>'));
         assert!(!escaped.contains('"'));
-        assert!(!escaped.contains('&'));
-        // Replaced with entities
+        // The original `&` is replaced with `&amp;`; other entities also use `&`.
+        assert!(escaped.contains("&amp;"));
         assert!(escaped.contains("&lt;"));
         assert!(escaped.contains("&gt;"));
     }
