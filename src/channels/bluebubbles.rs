@@ -166,7 +166,10 @@ impl BlueBubblesChannel {
             password,
             allowed_senders,
             ignore_senders,
-            client: reqwest::Client::new(),
+            client: reqwest::ClientBuilder::new()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("valid reqwest client config"),
             from_me_cache: Mutex::new(FromMeCache::new()),
             typing_handles: Mutex::new(HashMap::new()),
             transcription: None,

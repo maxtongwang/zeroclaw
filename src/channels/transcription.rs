@@ -57,7 +57,7 @@ pub async fn transcribe_audio_local(file_path: &str) -> anyhow::Result<String> {
         .await
         .context("Failed to create whisper temp dir")?;
 
-    let status = Command::new(whisper_bin)
+    let output = Command::new(whisper_bin)
         .args([
             "--model",
             "turbo",
@@ -69,15 +69,18 @@ pub async fn transcribe_audio_local(file_path: &str) -> anyhow::Result<String> {
             "False",
             file_path,
         ])
-        .stderr(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .status()
+        .output()
         .await
         .context("whisper CLI error")?;
 
-    if !status.success() {
+    if !output.status.success() {
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
-        anyhow::bail!("whisper CLI failed (exit {:?})", status.code());
+        // Log stderr so operators can diagnose missing models, OOM errors, etc.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.trim().is_empty() {
+            tracing::debug!("whisper stderr: {stderr}");
+        }
+        anyhow::bail!("whisper CLI failed (exit {:?})", output.status.code());
     }
 
     let stem = Path::new(file_path)
