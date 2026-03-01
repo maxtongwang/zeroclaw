@@ -8,7 +8,8 @@ const FROM_ME_CACHE_MAX: usize = 500;
 
 /// Audio attachment metadata extracted from a BlueBubbles webhook payload.
 struct AudioAttachment {
-    guid: String,
+    /// Local filesystem path to the attachment on the macOS host running BlueBubbles.
+    original_path: String,
     transfer_name: String,
 }
 
@@ -449,7 +450,13 @@ impl BlueBubblesChannel {
                 if !mime.starts_with("audio/") {
                     return None;
                 }
-                let guid = att.get("guid").and_then(|g| g.as_str())?.to_string();
+                // Require a local path — attachments without one cannot be transcribed.
+                let original_path = att
+                    .get("originalPath")
+                    .or_else(|| att.get("original_path"))
+                    .and_then(|p| p.as_str())
+                    .filter(|p| !p.is_empty())?
+                    .to_string();
                 let transfer_name = att
                     .get("transferName")
                     .or_else(|| att.get("filename"))
@@ -457,72 +464,21 @@ impl BlueBubblesChannel {
                     .unwrap_or("voice.m4a")
                     .to_string();
                 Some(AudioAttachment {
-                    guid,
+                    original_path,
                     transfer_name,
                 })
             })
             .collect()
     }
 
-    /// Download a BlueBubbles attachment by GUID via the REST API.
+    /// Transcribe a local audio attachment via the `whisper` CLI.
     ///
-    /// GUID bytes that are not unreserved URI characters are percent-encoded
-    /// inline (no new dependency).
-    async fn download_attachment(&self, guid: &str) -> anyhow::Result<Vec<u8>> {
-        use anyhow::Context as _;
-
-        let encoded: String = guid
-            .bytes()
-            .flat_map(|b| {
-                if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-                    vec![b as char]
-                } else {
-                    format!("%{b:02X}").chars().collect()
-                }
-            })
-            .collect();
-
-        let url = format!("{}/api/v1/attachment/{}/download", self.server_url, encoded);
-        let resp = self
-            .client
-            .get(&url)
-            .query(&[("password", &self.password)])
-            .send()
-            .await
-            .context("BB attachment download request failed")?;
-
-        anyhow::ensure!(
-            resp.status().is_success(),
-            "BB attachment download failed: HTTP {}",
-            resp.status()
-        );
-        Ok(resp.bytes().await?.to_vec())
-    }
-
-    /// Download and transcribe a single audio attachment.
-    ///
-    /// CAF files are converted to WAV via `ffmpeg` before upload.
+    /// Reads directly from `att.original_path` — no REST API download needed.
+    /// whisper handles CAF (iMessage voice memos) natively via ffmpeg.
     /// Returns `Ok(None)` when the transcript is empty (e.g. silence).
-    async fn download_and_transcribe(
-        &self,
-        att: &AudioAttachment,
-        cfg: &crate::config::TranscriptionConfig,
-    ) -> anyhow::Result<Option<String>> {
-        let raw = self.download_attachment(&att.guid).await?;
-
-        // convert_caf_to_wav takes &[u8] so raw is not consumed on the non-CAF path:
-        //   Ok(None)      → not CAF, reuse raw as-is — no clone needed
-        //   Ok(Some(wav)) → converted; raw is no longer needed
-        //   Err           → CAF but ffmpeg missing/failed → propagates → caller logs + fallback
-        let transfer_name = att.transfer_name.clone();
-        let (audio_data, file_name) =
-            match super::transcription::convert_caf_to_wav(&raw, &transfer_name).await? {
-                Some(wav) => (wav, "voice.wav".to_string()),
-                None => (raw, transfer_name),
-            };
-
+    async fn transcribe_local(att: &AudioAttachment) -> anyhow::Result<Option<String>> {
         let transcript =
-            super::transcription::transcribe_audio(audio_data, &file_name, cfg).await?;
+            super::transcription::transcribe_audio_local(&att.original_path).await?;
         if transcript.trim().is_empty() {
             return Ok(None);
         }
@@ -531,15 +487,15 @@ impl BlueBubblesChannel {
 
     /// Like `parse_webhook_payload` but transcribes audio attachments when
     /// `[transcription]` is configured. Gracefully falls back to the
-    /// `<media:audio>` placeholder if transcription is disabled, ffmpeg is
-    /// absent, or the API call fails.
+    /// `<media:audio>` placeholder if transcription is disabled, whisper is
+    /// absent, or transcription fails.
     pub async fn parse_webhook_payload_with_transcription(
         &self,
         payload: &serde_json::Value,
     ) -> Vec<ChannelMessage> {
-        let Some(ref cfg) = self.transcription else {
+        if self.transcription.is_none() {
             return self.parse_webhook_payload(payload);
-        };
+        }
 
         let event_type = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
         let Some(data) = payload.get("data") else {
@@ -555,7 +511,7 @@ impl BlueBubblesChannel {
             return self.parse_webhook_payload(payload);
         };
 
-        match self.download_and_transcribe(att, cfg).await {
+        match Self::transcribe_local(att).await {
             Ok(Some(transcript)) => {
                 // Inject transcript as text; clear attachments so parse_webhook_payload
                 // skips the <media:audio> placeholder
@@ -1670,17 +1626,35 @@ mod tests {
     #[test]
     fn extract_audio_attachments_detects_caf() {
         let data = serde_json::json!({
-            "attachments": [{"guid": "abc", "mimeType": "audio/caf", "transferName": "voice.caf"}]
+            "attachments": [{
+                "originalPath": "/Library/Messages/Attachments/voice.caf",
+                "mimeType": "audio/caf",
+                "transferName": "voice.caf"
+            }]
         });
         let atts = BlueBubblesChannel::extract_audio_attachments(&data);
         assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0].original_path, "/Library/Messages/Attachments/voice.caf");
         assert_eq!(atts[0].transfer_name, "voice.caf");
+    }
+
+    #[test]
+    fn extract_audio_attachments_skips_missing_original_path() {
+        // No originalPath → not transcribable, must be skipped
+        let data = serde_json::json!({
+            "attachments": [{"mimeType": "audio/caf", "transferName": "voice.caf"}]
+        });
+        assert!(BlueBubblesChannel::extract_audio_attachments(&data).is_empty());
     }
 
     #[test]
     fn extract_audio_attachments_skips_non_audio() {
         let data = serde_json::json!({
-            "attachments": [{"guid": "abc", "mimeType": "image/png", "transferName": "photo.png"}]
+            "attachments": [{
+                "originalPath": "/tmp/photo.png",
+                "mimeType": "image/png",
+                "transferName": "photo.png"
+            }]
         });
         assert!(BlueBubblesChannel::extract_audio_attachments(&data).is_empty());
     }

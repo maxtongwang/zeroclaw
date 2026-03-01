@@ -31,81 +31,88 @@ fn normalize_audio_filename(file_name: &str) -> String {
     }
 }
 
-/// Convert audio bytes to WAV using `ffmpeg` if the file is in CAF format
-/// (Core Audio Format — iMessage voice memos). Non-CAF files are returned
-/// unchanged via early `Ok(None)`.
+/// Transcribe an audio file via the local `whisper` CLI (OpenAI Whisper).
 ///
-/// Returns:
-/// - `Ok(None)`        — not a CAF file; caller uses original data as-is
-/// - `Ok(Some(bytes))` — conversion succeeded; use returned WAV bytes
-/// - `Err`             — CAF detected but ffmpeg missing or conversion failed;
-///                       caller should warn and skip transcription
-pub async fn convert_caf_to_wav(data: &[u8], file_name: &str) -> anyhow::Result<Option<Vec<u8>>> {
+/// Mirrors OpenClaw's approach: runs
+/// `whisper --model turbo --output_format txt --output_dir <tmpdir> --verbose False <path>`
+/// then reads `<tmpdir>/<stem>.txt`.
+///
+/// Supports all formats natively handled by whisper/ffmpeg, including CAF
+/// (Core Audio Format — iMessage voice memos), with no pre-conversion step.
+///
+/// Checks `whisper` in PATH and common Homebrew/system install locations.
+pub async fn transcribe_audio_local(file_path: &str) -> anyhow::Result<String> {
+    use std::path::Path;
     use tokio::process::Command;
 
-    // Early return: not a CAF file — no conversion needed, caller reuses original bytes
-    let ext = file_name
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if ext != "caf" {
-        return Ok(None);
-    }
+    let whisper_bin = resolve_whisper_bin()
+        .context("whisper not found — install openai-whisper (`pip install openai-whisper`)")?;
 
-    // CAF requires seekable input — stdin piping does not work; use temp files.
-    // Files are deleted on all exit paths. Note: if the async task is cancelled
-    // between write and cleanup, orphaned files may remain in tmp until OS sweeps.
     let base = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let tmp_dir = std::env::temp_dir();
-    let caf_path = tmp_dir.join(format!("zc_{base}.caf"));
-    let wav_path = tmp_dir.join(format!("zc_{base}.wav"));
-
-    tokio::fs::write(&caf_path, data)
+    let tmp_dir = std::env::temp_dir().join(format!("zc_whisper_{base}"));
+    tokio::fs::create_dir_all(&tmp_dir)
         .await
-        .context("Failed to write CAF temp file")?;
+        .context("Failed to create whisper temp dir")?;
 
-    let result = Command::new("ffmpeg")
+    let status = Command::new(whisper_bin)
         .args([
-            "-y",
-            "-i",
-            caf_path.to_str().unwrap_or(""),
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            wav_path.to_str().unwrap_or(""),
+            "--model",
+            "turbo",
+            "--output_format",
+            "txt",
+            "--output_dir",
+            tmp_dir.to_str().unwrap_or(""),
+            "--verbose",
+            "False",
+            file_path,
         ])
         .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
         .status()
-        .await;
+        .await
+        .context("whisper CLI error")?;
 
-    let _ = tokio::fs::remove_file(&caf_path).await;
-
-    match result {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let _ = tokio::fs::remove_file(&wav_path).await;
-            anyhow::bail!("ffmpeg not found — install ffmpeg to transcribe iMessage CAF audio");
-        }
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&wav_path).await;
-            return Err(e).context("ffmpeg CAF→WAV conversion error");
-        }
-        Ok(s) if !s.success() => {
-            let _ = tokio::fs::remove_file(&wav_path).await;
-            anyhow::bail!("ffmpeg CAF→WAV conversion failed (exit {:?})", s.code());
-        }
-        Ok(_) => {}
+    if !status.success() {
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+        anyhow::bail!("whisper CLI failed (exit {:?})", status.code());
     }
 
-    let wav = tokio::fs::read(&wav_path)
+    let stem = Path::new(file_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("audio");
+    let txt_path = tmp_dir.join(format!("{stem}.txt"));
+    let txt = tokio::fs::read_to_string(&txt_path)
         .await
-        .context("Failed to read WAV temp file")?;
-    let _ = tokio::fs::remove_file(&wav_path).await;
-    Ok(Some(wav))
+        .context("Failed to read whisper output")?;
+    let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+
+    let text = txt.trim().to_string();
+    anyhow::ensure!(!text.is_empty(), "whisper produced empty transcript");
+    Ok(text)
+}
+
+/// Resolve the `whisper` binary path by checking PATH and common install locations.
+fn resolve_whisper_bin() -> Option<&'static str> {
+    const CANDIDATES: &[&str] = &[
+        "whisper",
+        "/opt/homebrew/bin/whisper",
+        "/usr/local/bin/whisper",
+    ];
+    CANDIDATES.iter().copied().find(|bin| {
+        if bin.starts_with('/') {
+            std::path::Path::new(bin).is_file()
+        } else {
+            std::process::Command::new("which")
+                .arg(bin)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+    })
 }
 
 /// Transcribe audio bytes via a Whisper-compatible transcription API.
@@ -203,16 +210,10 @@ pub async fn transcribe_audio(
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn convert_caf_skips_non_caf() {
-        let r = convert_caf_to_wav(&[0u8; 10], "voice.m4a").await.unwrap();
-        assert!(r.is_none(), "non-CAF should return Ok(None)");
-    }
-
-    #[tokio::test]
-    async fn convert_caf_skips_no_extension() {
-        let r = convert_caf_to_wav(&[0u8; 10], "voice").await.unwrap();
-        assert!(r.is_none());
+    #[test]
+    fn resolve_whisper_bin_returns_str_or_none() {
+        // Just assert the function doesn't panic; result depends on local install.
+        let _ = resolve_whisper_bin();
     }
 
     #[tokio::test]
