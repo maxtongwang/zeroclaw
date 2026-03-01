@@ -607,6 +607,12 @@ impl BlueBubblesChannel {
             return self.parse_webhook_payload(payload);
         };
 
+        // Start typing indicator before whisper runs — transcription can take >30 s
+        // and without this the user sees no feedback during the slow CPU phase.
+        if let Some(chat_guid) = Self::extract_chat_guid(data) {
+            let _ = self.start_typing(&chat_guid).await;
+        }
+
         match self.transcribe_local(&att).await {
             Ok(Some(transcript)) => {
                 // Inject transcript as text; clear attachments so parse_webhook_payload
