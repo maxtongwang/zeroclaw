@@ -56,6 +56,8 @@ Telegram/Discord sender-scoped model routing:
 Supervised tool approvals (all non-CLI channels):
 - `/approve-request <tool-name>` — create a pending approval request
 - `/approve-confirm <request-id>` — confirm pending request (same sender + same chat/channel only)
+- `/approve-allow <request-id>` — approve the current pending runtime execution request once (no policy persistence)
+- `/approve-deny <request-id>` — deny the current pending runtime execution request
 - `/approve-pending` — list pending requests for your current sender+chat/channel scope
 - `/approve <tool-name>` — direct one-step approve + persist (`autonomy.auto_approve`, compatibility path)
 - `/unapprove <tool-name>` — revoke and remove persisted approval
@@ -76,6 +78,7 @@ Notes:
 - You can restrict who can use approval-management commands via `[autonomy].non_cli_approval_approvers`.
 - Configure natural-language approval mode via `[autonomy].non_cli_natural_language_approval_mode`.
 - `autonomy.non_cli_excluded_tools` is reloaded from `config.toml` at runtime; `/approvals` shows the currently effective list.
+- Default non-CLI exclusions include both `shell` and `process`; remove `process` from `[autonomy].non_cli_excluded_tools` only when you explicitly want background command execution in chat channels.
 - Each incoming message injects a runtime tool-availability snapshot into the system prompt, derived from the same exclusion policy used by execution.
 
 ## Inbound Image Marker Protocol
@@ -146,6 +149,7 @@ If `[channels_config.matrix]`, `[channels_config.lark]`, or `[channels_config.fe
 | Napcat | websocket receive + HTTP send (OneBot) | No (typically local/LAN) |
 | Linq | webhook (`/linq`) | Yes (public HTTPS callback) |
 | iMessage | local integration | No |
+| ACP | stdio (JSON-RPC 2.0) | No |
 | Nostr | relay websocket (NIP-04 / NIP-17) | No |
 
 ---
@@ -160,7 +164,7 @@ For channels with inbound sender allowlists:
 
 Field names differ by channel:
 
-- `allowed_users` (Telegram/Discord/Slack/Mattermost/Matrix/IRC/Lark/Feishu/DingTalk/QQ/Napcat/Nextcloud Talk)
+- `allowed_users` (Telegram/Discord/Slack/Mattermost/Matrix/IRC/Lark/Feishu/DingTalk/QQ/Napcat/Nextcloud Talk/ACP)
 - `allowed_from` (Signal)
 - `allowed_numbers` (WhatsApp)
 - `allowed_senders` (Email/Linq)
@@ -540,6 +544,25 @@ Notes:
 allowed_contacts = ["*"]
 ```
 
+### 4.18 ACP
+
+ACP (Agent Client Protocol) enables ZeroClaw to act as a client for OpenCode ACP server,
+allowing remote control of OpenCode behavior through JSON-RPC 2.0 communication over stdio.
+
+```toml
+[channels_config.acp]
+opencode_path = "opencode"  # optional, default: "opencode"
+workdir = "/path/to/workspace"  # optional
+extra_args = []  # optional additional arguments to `opencode acp`
+allowed_users = ["*"]  # empty = deny all, "*" = allow all
+```
+
+Notes:
+- ACP uses JSON-RPC 2.0 protocol over stdio with newline-delimited messages.
+- Requires `opencode` binary in PATH or specified via `opencode_path`.
+- The channel starts OpenCode subprocess via `opencode acp` command.
+- Responses from OpenCode can be sent back to the originating channel when configured.
+
 ---
 
 ## 5. Validation Workflow
@@ -588,7 +611,7 @@ RUST_LOG=info zeroclaw daemon 2>&1 | tee /tmp/zeroclaw.log
 Then filter channel/gateway events:
 
 ```bash
-rg -n "Matrix|Telegram|Discord|Slack|Mattermost|Signal|WhatsApp|Email|IRC|Lark|DingTalk|QQ|iMessage|Nostr|Webhook|Channel" /tmp/zeroclaw.log
+rg -n "Matrix|Telegram|Discord|Slack|Mattermost|Signal|WhatsApp|Email|IRC|Lark|DingTalk|QQ|iMessage|Nostr|Webhook|Channel|ACP" /tmp/zeroclaw.log
 ```
 
 ### 7.2 Keyword table
@@ -610,6 +633,7 @@ rg -n "Matrix|Telegram|Discord|Slack|Mattermost|Signal|WhatsApp|Email|IRC|Lark|D
 | QQ | `QQ: connected and identified` | `QQ: ignoring C2C message from unauthorized user:` / `QQ: ignoring group message from unauthorized user:` | `QQ: received Reconnect (op 7)` / `QQ: received Invalid Session (op 9)` / `QQ: message channel closed` |
 | Nextcloud Talk (gateway) | `POST /nextcloud-talk — Nextcloud Talk bot webhook` | `Nextcloud Talk webhook signature verification failed` / `Nextcloud Talk: ignoring message from unauthorized actor:` | `Nextcloud Talk send failed:` / `LLM error for Nextcloud Talk message:` |
 | iMessage | `iMessage channel listening (AppleScript bridge)...` | (contact allowlist enforced by `allowed_contacts`) | `iMessage poll error:` |
+| ACP | `ACP channel started` | `ACP: ignoring message from unauthorized user:` | `ACP process exited unexpectedly:` / `ACP JSON-RPC timeout:` / `ACP process spawn failed:` |
 | Nostr | `Nostr channel listening as npub1...` | `Nostr: ignoring NIP-04 message from unauthorized pubkey:` / `Nostr: ignoring NIP-17 message from unauthorized pubkey:` | `Failed to decrypt NIP-04 message:` / `Failed to unwrap NIP-17 gift wrap:` / `Nostr relay pool shut down` |
 
 ### 7.3 Runtime supervisor keywords

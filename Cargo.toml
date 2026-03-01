@@ -6,6 +6,7 @@ resolver = "2"
 name = "zeroclaw"
 version = "0.1.7"
 edition = "2021"
+build = "build.rs"
 authors = ["theonlyhennygod"]
 license = "MIT OR Apache-2.0"
 description = "Zero overhead. Zero compromise. 100% Rust. The fastest, smallest AI assistant."
@@ -34,7 +35,6 @@ matrix-sdk = { version = "0.16", optional = true, default-features = false, feat
 # Serialization
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
-serde_ignored = "0.1"
 
 # Config
 directories = "6.0"
@@ -110,7 +110,7 @@ prost = { version = "0.14", default-features = false, features = ["derive"], opt
 # Memory / persistence
 rusqlite = { version = "0.37", features = ["bundled"] }
 postgres = { version = "0.19", features = ["with-chrono-0_4"], optional = true }
-tokio-postgres-rustls = { version = "0.12", optional = true }
+tokio-postgres-rustls = { version = "0.13", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 chrono-tz = "0.10"
 cron = "0.15"
@@ -180,8 +180,8 @@ tempfile = "3.14"
 
 # WASM plugin runtime (optional, enable with --features wasm-tools)
 # Uses WASI stdio protocol — tools read JSON from stdin, write JSON to stdout.
-wasmtime = { version = "24.0.6", optional = true, default-features = false, features = ["cranelift", "runtime"] }
-wasmtime-wasi = { version = "24.0.6", optional = true, default-features = false, features = ["preview1"] }
+wasmtime = { version = "36.0.6", optional = true, default-features = false, features = ["cranelift", "runtime"] }
+wasmtime-wasi = { version = "36.0.6", optional = true, default-features = false, features = ["preview1"] }
 
 # Terminal QR rendering for WhatsApp Web pairing flow.
 qrcode = { version = "0.14", optional = true }
@@ -205,9 +205,8 @@ landlock = { version = "0.4", optional = true }
 libc = "0.2"
 
 [features]
-# Default enables wasm-tools where platform runtime dependencies are available.
-# Unsupported targets (for example Android/Termux) use a stub implementation.
-default = ["wasm-tools"]
+# Keep default minimal for widest host compatibility (including macOS 10.15).
+default = []
 hardware = ["nusb", "tokio-serial"]
 channel-matrix = ["dep:matrix-sdk"]
 channel-lark = ["dep:prost"]
@@ -252,10 +251,9 @@ panic = "abort"      # Reduce binary size
 
 [profile.release-fast]
 inherits = "release"
-lto = false          # Skip fat LTO — enables sccache + parallel codegen
-codegen-units = 16   # Parallel codegen for faster builds on powerful machines (16GB+ RAM recommended)
-opt-level = 2        # Faster compile than "z"; still optimized
-                     # Use: cargo build --profile release-fast
+# Keep release-fast under CI binary size safeguard (20MB hard gate).
+# Using 1 codegen unit preserves release-level size characteristics.
+codegen-units = 1
 
 [profile.dist]
 inherits = "release"

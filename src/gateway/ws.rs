@@ -11,19 +11,191 @@
 
 use super::AppState;
 use crate::agent::loop_::{build_shell_policy_instructions, build_tool_instructions_from_specs};
+use crate::memory::MemoryCategory;
 use crate::providers::ChatMessage;
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        RawQuery, State, WebSocketUpgrade,
+        ConnectInfo, RawQuery, State, WebSocketUpgrade,
     },
     http::{header, HeaderMap},
     response::IntoResponse,
 };
+use std::net::SocketAddr;
 use uuid::Uuid;
 
 const EMPTY_WS_RESPONSE_FALLBACK: &str =
     "Tool execution completed, but the model returned no final text response. Please ask me to summarize the result.";
+const WS_HISTORY_MEMORY_KEY_PREFIX: &str = "gateway_ws_history";
+const MAX_WS_PERSISTED_TURNS: usize = 128;
+const MAX_WS_SESSION_ID_LEN: usize = 128;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct WsQueryParams {
+    token: Option<String>,
+    session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct WsHistoryTurn {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
+struct WsPersistedHistory {
+    version: u8,
+    messages: Vec<WsHistoryTurn>,
+}
+
+fn normalize_ws_session_id(candidate: Option<&str>) -> Option<String> {
+    let raw = candidate?.trim();
+    if raw.is_empty() || raw.len() > MAX_WS_SESSION_ID_LEN {
+        return None;
+    }
+
+    if raw
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Some(raw.to_string());
+    }
+
+    None
+}
+
+fn parse_ws_query_params(raw_query: Option<&str>) -> WsQueryParams {
+    let Some(query) = raw_query else {
+        return WsQueryParams::default();
+    };
+
+    let mut params = WsQueryParams::default();
+    for kv in query.split('&') {
+        let mut parts = kv.splitn(2, '=');
+        let key = parts.next().unwrap_or("").trim();
+        let value = parts.next().unwrap_or("").trim();
+        if value.is_empty() {
+            continue;
+        }
+
+        match key {
+            "token" if params.token.is_none() => {
+                params.token = Some(value.to_string());
+            }
+            "session_id" if params.session_id.is_none() => {
+                params.session_id = normalize_ws_session_id(Some(value));
+            }
+            _ => {}
+        }
+    }
+
+    params
+}
+
+fn ws_history_memory_key(session_id: &str) -> String {
+    format!("{WS_HISTORY_MEMORY_KEY_PREFIX}:{session_id}")
+}
+
+fn ws_history_turns_from_chat(history: &[ChatMessage]) -> Vec<WsHistoryTurn> {
+    let mut turns = history
+        .iter()
+        .filter_map(|msg| match msg.role.as_str() {
+            "user" | "assistant" => {
+                let content = msg.content.trim();
+                if content.is_empty() {
+                    None
+                } else {
+                    Some(WsHistoryTurn {
+                        role: msg.role.clone(),
+                        content: content.to_string(),
+                    })
+                }
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if turns.len() > MAX_WS_PERSISTED_TURNS {
+        let keep_from = turns.len().saturating_sub(MAX_WS_PERSISTED_TURNS);
+        turns.drain(0..keep_from);
+    }
+    turns
+}
+
+fn restore_chat_history(system_prompt: &str, turns: &[WsHistoryTurn]) -> Vec<ChatMessage> {
+    let mut history = vec![ChatMessage::system(system_prompt)];
+    for turn in turns {
+        match turn.role.as_str() {
+            "user" => history.push(ChatMessage::user(&turn.content)),
+            "assistant" => history.push(ChatMessage::assistant(&turn.content)),
+            _ => {}
+        }
+    }
+    history
+}
+
+async fn load_ws_history(
+    state: &AppState,
+    session_id: &str,
+    system_prompt: &str,
+) -> Vec<ChatMessage> {
+    let key = ws_history_memory_key(session_id);
+    let Some(entry) = state.mem.get(&key).await.ok().flatten() else {
+        return vec![ChatMessage::system(system_prompt)];
+    };
+
+    let parsed = serde_json::from_str::<WsPersistedHistory>(&entry.content)
+        .map(|history| history.messages)
+        .or_else(|_| serde_json::from_str::<Vec<WsHistoryTurn>>(&entry.content));
+
+    match parsed {
+        Ok(turns) => restore_chat_history(system_prompt, &turns),
+        Err(err) => {
+            tracing::warn!(
+                "Failed to parse persisted websocket history for session {}: {}",
+                session_id,
+                err
+            );
+            vec![ChatMessage::system(system_prompt)]
+        }
+    }
+}
+
+async fn persist_ws_history(state: &AppState, session_id: &str, history: &[ChatMessage]) {
+    let payload = WsPersistedHistory {
+        version: 1,
+        messages: ws_history_turns_from_chat(history),
+    };
+    let serialized = match serde_json::to_string(&payload) {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to serialize websocket history for session {}: {}",
+                session_id,
+                err
+            );
+            return;
+        }
+    };
+
+    let key = ws_history_memory_key(session_id);
+    if let Err(err) = state
+        .mem
+        .store(
+            &key,
+            &serialized,
+            MemoryCategory::Conversation,
+            Some(session_id),
+        )
+        .await
+    {
+        tracing::warn!(
+            "Failed to persist websocket history for session {}: {}",
+            session_id,
+            err
+        );
+    }
+}
 
 fn sanitize_ws_response(
     response: &str,
@@ -162,33 +334,82 @@ fn build_ws_system_prompt(
     prompt
 }
 
+fn refresh_ws_history_system_prompt_datetime(history: &mut [ChatMessage]) {
+    if let Some(system_message) = history.first_mut() {
+        if system_message.role == "system" {
+            crate::agent::prompt::refresh_prompt_datetime(&mut system_message.content);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WsAuthRejection {
+    MissingPairingToken,
+    NonLocalWithoutAuthLayer,
+}
+
+fn evaluate_ws_auth(
+    pairing_required: bool,
+    is_loopback_request: bool,
+    has_valid_pairing_token: bool,
+) -> Option<WsAuthRejection> {
+    if pairing_required {
+        return (!has_valid_pairing_token).then_some(WsAuthRejection::MissingPairingToken);
+    }
+
+    if !is_loopback_request && !has_valid_pairing_token {
+        return Some(WsAuthRejection::NonLocalWithoutAuthLayer);
+    }
+
+    None
+}
+
 /// GET /ws/chat — WebSocket upgrade for agent chat
 pub async fn handle_ws_chat(
     State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     RawQuery(query): RawQuery,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    // Auth via Authorization header or websocket protocol token.
-    if state.pairing.require_pairing() {
-        let query_token = extract_query_token(query.as_deref());
-        let token = extract_ws_bearer_token(&headers, query_token.as_deref()).unwrap_or_default();
-        if !state.pairing.is_authenticated(&token) {
+    let query_params = parse_ws_query_params(query.as_deref());
+    let token =
+        extract_ws_bearer_token(&headers, query_params.token.as_deref()).unwrap_or_default();
+    let has_valid_pairing_token = !token.is_empty() && state.pairing.is_authenticated(&token);
+    let is_loopback_request =
+        super::is_loopback_request(Some(peer_addr), &headers, state.trust_forwarded_headers);
+
+    match evaluate_ws_auth(
+        state.pairing.require_pairing(),
+        is_loopback_request,
+        has_valid_pairing_token,
+    ) {
+        Some(WsAuthRejection::MissingPairingToken) => {
             return (
                 axum::http::StatusCode::UNAUTHORIZED,
                 "Unauthorized — provide Authorization: Bearer <token>, Sec-WebSocket-Protocol: bearer.<token>, or ?token=<token>",
             )
                 .into_response();
         }
+        Some(WsAuthRejection::NonLocalWithoutAuthLayer) => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Unauthorized — enable gateway pairing or provide a valid paired bearer token for non-local /ws/chat access",
+            )
+                .into_response();
+        }
+        None => {}
     }
 
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    let session_id = query_params
+        .session_id
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    ws.on_upgrade(move |socket| handle_socket(socket, state, session_id))
         .into_response()
 }
 
-async fn handle_socket(mut socket: WebSocket, state: AppState) {
-    // Maintain conversation history for this WebSocket session
-    let mut history: Vec<ChatMessage> = Vec::new();
+async fn handle_socket(mut socket: WebSocket, state: AppState, session_id: String) {
     let ws_session_id = format!("ws_{}", Uuid::new_v4());
 
     // Build system prompt once for the session
@@ -202,8 +423,17 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         )
     };
 
-    // Add system message to history
-    history.push(ChatMessage::system(&system_prompt));
+    // Restore persisted history (if any) and replay to the client before processing new input.
+    let mut history = load_ws_history(&state, &session_id, &system_prompt).await;
+    let persisted_turns = ws_history_turns_from_chat(&history);
+    let history_payload = serde_json::json!({
+        "type": "history",
+        "session_id": session_id.as_str(),
+        "messages": persisted_turns,
+    });
+    let _ = socket
+        .send(Message::Text(history_payload.to_string().into()))
+        .await;
 
     while let Some(msg) = socket.recv().await {
         let msg = match msg {
@@ -250,8 +480,11 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             continue;
         }
 
+        refresh_ws_history_system_prompt_datetime(&mut history);
+
         // Add user message to history
         history.push(ChatMessage::user(&content));
+        persist_ws_history(&state, &session_id, &history).await;
 
         // Get provider info
         let provider_label = state
@@ -280,6 +513,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 );
                 // Add assistant response to history
                 history.push(ChatMessage::assistant(&safe_response));
+                persist_ws_history(&state, &session_id, &history).await;
 
                 // Send the full response as a done message
                 let done = serde_json::json!({
@@ -347,18 +581,7 @@ fn extract_ws_bearer_token(headers: &HeaderMap, query_token: Option<&str>) -> Op
 }
 
 fn extract_query_token(raw_query: Option<&str>) -> Option<String> {
-    let query = raw_query?;
-    for kv in query.split('&') {
-        let mut parts = kv.splitn(2, '=');
-        if parts.next() != Some("token") {
-            continue;
-        }
-        let token = parts.next().unwrap_or("").trim();
-        if !token.is_empty() {
-            return Some(token.to_string());
-        }
-    }
-    None
+    parse_ws_query_params(raw_query).token
 }
 
 #[cfg(test)]
@@ -445,6 +668,104 @@ mod tests {
             Some("query-token")
         );
         assert!(extract_query_token(Some("foo=1")).is_none());
+    }
+
+    #[test]
+    fn parse_ws_query_params_reads_token_and_session_id() {
+        let parsed = parse_ws_query_params(Some("foo=1&session_id=sess_123&token=query-token"));
+        assert_eq!(parsed.token.as_deref(), Some("query-token"));
+        assert_eq!(parsed.session_id.as_deref(), Some("sess_123"));
+    }
+
+    #[test]
+    fn parse_ws_query_params_rejects_invalid_session_id() {
+        let parsed = parse_ws_query_params(Some("session_id=../../etc/passwd"));
+        assert!(parsed.session_id.is_none());
+    }
+
+    #[test]
+    fn ws_history_turns_from_chat_skips_system_and_non_dialog_turns() {
+        let history = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user(" hello "),
+            ChatMessage {
+                role: "tool".to_string(),
+                content: "ignored".to_string(),
+            },
+            ChatMessage::assistant(" world "),
+        ];
+
+        let turns = ws_history_turns_from_chat(&history);
+        assert_eq!(
+            turns,
+            vec![
+                WsHistoryTurn {
+                    role: "user".to_string(),
+                    content: "hello".to_string()
+                },
+                WsHistoryTurn {
+                    role: "assistant".to_string(),
+                    content: "world".to_string()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn refresh_ws_history_system_prompt_datetime_updates_only_system_entry() {
+        let mut history = vec![
+            ChatMessage::system("## Current Date & Time\n\n2000-01-01 00:00:00 (UTC)\n"),
+            ChatMessage::user("hello"),
+        ];
+        refresh_ws_history_system_prompt_datetime(&mut history);
+        assert!(!history[0].content.contains("2000-01-01 00:00:00 (UTC)"));
+        assert_eq!(history[1].content, "hello");
+    }
+
+    #[test]
+    fn restore_chat_history_applies_system_prompt_once() {
+        let turns = vec![
+            WsHistoryTurn {
+                role: "user".to_string(),
+                content: "u1".to_string(),
+            },
+            WsHistoryTurn {
+                role: "assistant".to_string(),
+                content: "a1".to_string(),
+            },
+        ];
+
+        let restored = restore_chat_history("sys", &turns);
+        assert_eq!(restored.len(), 3);
+        assert_eq!(restored[0].role, "system");
+        assert_eq!(restored[0].content, "sys");
+        assert_eq!(restored[1].role, "user");
+        assert_eq!(restored[1].content, "u1");
+        assert_eq!(restored[2].role, "assistant");
+        assert_eq!(restored[2].content, "a1");
+    }
+
+    #[test]
+    fn evaluate_ws_auth_requires_pairing_token_when_pairing_is_enabled() {
+        assert_eq!(
+            evaluate_ws_auth(true, true, false),
+            Some(WsAuthRejection::MissingPairingToken)
+        );
+        assert_eq!(evaluate_ws_auth(true, false, true), None);
+    }
+
+    #[test]
+    fn evaluate_ws_auth_rejects_public_without_auth_layer_when_pairing_disabled() {
+        assert_eq!(
+            evaluate_ws_auth(false, false, false),
+            Some(WsAuthRejection::NonLocalWithoutAuthLayer)
+        );
+    }
+
+    #[test]
+    fn evaluate_ws_auth_allows_loopback_or_valid_token_when_pairing_disabled() {
+        assert_eq!(evaluate_ws_auth(false, true, false), None);
+        assert_eq!(evaluate_ws_auth(false, false, true), None);
     }
 
     struct MockScheduleTool;

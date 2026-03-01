@@ -38,6 +38,38 @@ Notes:
 - Unset keeps the provider's built-in default.
 - Environment override: `ZEROCLAW_MODEL_SUPPORT_VISION` or `MODEL_SUPPORT_VISION` (values: `true`/`false`/`1`/`0`/`yes`/`no`/`on`/`off`).
 
+## `[model_providers.<profile>]`
+
+Use named profiles to map a logical provider id to a provider name/base URL and optional profile-scoped credentials.
+
+| Key | Default | Notes |
+|---|---|---|
+| `name` | unset | Optional provider id override (for example `openai`, `openai-codex`) |
+| `base_url` | unset | Optional OpenAI-compatible endpoint URL |
+| `wire_api` | unset | Optional protocol mode: `responses` or `chat_completions` |
+| `model` | unset | Optional profile-scoped default model |
+| `api_key` | unset | Optional profile-scoped API key (used when top-level `api_key` is empty) |
+| `requires_openai_auth` | `false` | Load OpenAI auth material (`OPENAI_API_KEY` / Codex auth file) |
+
+Notes:
+
+- If both top-level `api_key` and profile `api_key` are present, top-level `api_key` wins.
+- If top-level `default_model` is still the global OpenRouter default, profile `model` is used as an automatic compatibility override.
+- Secrets encryption applies to profile API keys when `secrets.encrypt = true`.
+
+Example:
+
+```toml
+default_provider = "sub2api"
+
+[model_providers.sub2api]
+name = "sub2api"
+base_url = "https://api.example.com/v1"
+wire_api = "chat_completions"
+model = "qwen-max"
+api_key = "sk-profile-key"
+```
+
 ## `[observability]`
 
 | Key | Default | Purpose |
@@ -504,6 +536,7 @@ Notes:
 |---|---|---|
 | `open_skills_enabled` | `false` | Opt-in loading/sync of community `open-skills` repository |
 | `open_skills_dir` | unset | Optional local path for `open-skills` (defaults to `$HOME/open-skills` when enabled) |
+| `trusted_skill_roots` | `[]` | Allowlist of directory roots for symlink targets in `workspace/skills/*` |
 | `prompt_injection_mode` | `full` | Skill prompt verbosity: `full` (inline instructions/tools) or `compact` (name/description/location only) |
 | `clawhub_token` | unset | Optional Bearer token for authenticated ClawhHub skill downloads |
 
@@ -516,7 +549,8 @@ Notes:
   - `ZEROCLAW_SKILLS_PROMPT_MODE` accepts `full` or `compact`.
 - Precedence for enable flag: `ZEROCLAW_OPEN_SKILLS_ENABLED` → `skills.open_skills_enabled` in `config.toml` → default `false`.
 - `prompt_injection_mode = "compact"` is recommended on low-context local models to reduce startup prompt size while keeping skill files available on demand.
-- Skill loading and `zeroclaw skills install` both apply a static security audit. Skills that contain symlinks, script-like files, high-risk shell payload snippets, or unsafe markdown link traversal are rejected.
+- Symlinked workspace skills are blocked by default. Set `trusted_skill_roots` to allow local shared-skill directories after explicit trust review.
+- `zeroclaw skills install` and `zeroclaw skills audit` apply a static security audit. Skills that contain script-like files, high-risk shell payload snippets, or unsafe markdown link traversal are rejected.
 - `clawhub_token` is sent as `Authorization: Bearer <token>` when downloading from ClawhHub. Obtain a token from [https://clawhub.ai](https://clawhub.ai) after signing in. Required if the API returns 429 (rate-limited) or 401 (unauthorized) for anonymous requests.
 
 **ClawhHub token example:**
@@ -678,8 +712,8 @@ When using `credential_profile`, do not also set the same header key in `args.he
 | Key | Default | Purpose |
 |---|---|---|
 | `enabled` | `false` | Enable `web_fetch` for page-to-text extraction |
-| `provider` | `fast_html2md` | Fetch/render backend: `fast_html2md`, `nanohtml2text`, `firecrawl` |
-| `api_key` | unset | API key for provider backends that require it (e.g. `firecrawl`) |
+| `provider` | `fast_html2md` | Fetch/render backend: `fast_html2md`, `nanohtml2text`, `firecrawl`, `tavily` |
+| `api_key` | unset | API key for provider backends that require it (e.g. `firecrawl`, `tavily`) |
 | `api_url` | unset | Optional API URL override (self-hosted/alternate endpoint) |
 | `allowed_domains` | `["*"]` | Domain allowlist (`"*"` allows all public domains) |
 | `blocked_domains` | `[]` | Denylist applied before allowlist |
@@ -823,6 +857,7 @@ Environment overrides:
 | `level` | `supervised` | `read_only`, `supervised`, or `full` |
 | `workspace_only` | `true` | reject absolute path inputs unless explicitly disabled |
 | `allowed_commands` | _required for shell execution_ | allowlist of executable names, explicit executable paths, or `"*"` |
+| `command_context_rules` | `[]` | per-command context-aware allow/deny rules (domain/path constraints, optional high-risk override) |
 | `forbidden_paths` | built-in protected list | explicit path denylist (system paths + sensitive dotdirs by default) |
 | `allowed_roots` | `[]` | additional roots allowed outside workspace after canonicalization |
 | `max_actions_per_hour` | `20` | per-policy action budget |
@@ -833,7 +868,7 @@ Environment overrides:
 | `allow_sensitive_file_writes` | `false` | allow `file_write`/`file_edit` on sensitive files/dirs (for example `.env`, `.aws/credentials`, private keys) |
 | `auto_approve` | `[]` | tool operations always auto-approved |
 | `always_ask` | `[]` | tool operations that always require approval |
-| `non_cli_excluded_tools` | `[]` | tools hidden from non-CLI channel tool specs |
+| `non_cli_excluded_tools` | built-in denylist (includes `shell`, `process`, `file_write`, ...) | tools hidden from non-CLI channel tool specs |
 | `non_cli_approval_approvers` | `[]` | optional allowlist for who can run non-CLI approval-management commands |
 | `non_cli_natural_language_approval_mode` | `direct` | natural-language behavior for approval-management commands (`direct`, `request_confirm`, `disabled`) |
 | `non_cli_natural_language_approval_mode_by_channel` | `{}` | per-channel override map for natural-language approval mode |
@@ -844,6 +879,10 @@ Notes:
 - Access outside the workspace requires `allowed_roots`, even when `workspace_only = false`.
 - `allowed_roots` supports absolute paths, `~/...`, and workspace-relative paths.
 - `allowed_commands` entries can be command names (for example, `"git"`), explicit executable paths (for example, `"/usr/bin/antigravity"`), or `"*"` to allow any command name/path (risk gates still apply).
+- `command_context_rules` can narrow or override `allowed_commands` for matching commands:
+  - `action = "allow"` rules are restrictive when present for a command: at least one allow rule must match.
+  - `action = "deny"` rules explicitly block matching contexts.
+  - `allow_high_risk = true` allows a matching high-risk command to pass the hard block, but supervised mode still requires `approved=true`.
 - `file_read` blocks sensitive secret-bearing files/directories by default. Set `allow_sensitive_file_reads = true` only for controlled debugging sessions.
 - `file_write` and `file_edit` block sensitive secret-bearing files/directories by default. Set `allow_sensitive_file_writes = true` only for controlled break-glass sessions.
 - `file_read`, `file_write`, and `file_edit` refuse multiply-linked files (hard-link guard) to reduce workspace path bypass risk via hard-link escapes.
@@ -853,6 +892,10 @@ Notes:
   - One-step flow: `/approve <tool>`.
   - Two-step flow: `/approve-request <tool>` then `/approve-confirm <request-id>` (same sender + same chat/channel).
   Both paths write to `autonomy.auto_approve` and remove the tool from `autonomy.always_ask`.
+- For pending runtime execution prompts (including Telegram inline approval buttons), use:
+  - `/approve-allow <request-id>` to approve only the current pending request.
+  - `/approve-deny <request-id>` to reject the current pending request.
+  This path does not modify `autonomy.auto_approve` or `autonomy.always_ask`.
 - `non_cli_natural_language_approval_mode` controls how strict natural-language approval intents are:
   - `direct` (default): natural-language approval grants immediately (private-chat friendly).
   - `request_confirm`: natural-language approval creates a pending request that needs explicit confirm.
@@ -865,6 +908,7 @@ Notes:
   - `telegram:alice` allows only that channel+sender pair.
   - `telegram:*` allows any sender on Telegram.
   - `*:alice` allows `alice` on any channel.
+- By default, `process` is excluded on non-CLI channels alongside `shell`. To opt in intentionally, remove `"process"` from `[autonomy].non_cli_excluded_tools` in `config.toml`.
 - Use `/unapprove <tool>` to remove persisted approval from `autonomy.auto_approve`.
 - `/approve-pending` lists pending requests for the current sender+chat/channel scope.
 - If a tool remains unavailable after approval, check `autonomy.non_cli_excluded_tools` (runtime `/approvals` shows this list). Channel runtime reloads this list from `config.toml` automatically.
@@ -874,6 +918,18 @@ Notes:
 workspace_only = false
 forbidden_paths = ["/etc", "/root", "/proc", "/sys", "~/.ssh", "~/.gnupg", "~/.aws"]
 allowed_roots = ["~/Desktop/projects", "/opt/shared-repo"]
+
+[[autonomy.command_context_rules]]
+command = "curl"
+action = "allow"
+allowed_domains = ["api.github.com", "*.example.internal"]
+allow_high_risk = true
+
+[[autonomy.command_context_rules]]
+command = "rm"
+action = "allow"
+allowed_path_prefixes = ["/tmp"]
+allow_high_risk = true
 ```
 
 ## `[memory]`
@@ -1031,9 +1087,69 @@ Notes:
   - `mode = "all_messages"` or `mode = "mention_only"`
   - `allowed_sender_ids = ["..."]` to bypass mention gating in groups
   - `allowed_users` allowlist checks still run first
+- Telegram/Discord/Lark/Feishu ACK emoji reactions are configurable under
+  `[channels_config.ack_reaction.<channel>]` with switchable enable state,
+  custom emoji pools, and conditional rules.
 - Legacy `mention_only` flags (Telegram/Discord/Mattermost/Lark) remain supported as fallback only.
   If `group_reply.mode` is set, it takes precedence over legacy `mention_only`.
 - While `zeroclaw channel start` is running, updates to `default_provider`, `default_model`, `default_temperature`, `api_key`, `api_url`, and `reliability.*` are hot-applied from `config.toml` on the next inbound message.
+
+### `[channels_config.ack_reaction.<channel>]`
+
+Per-channel ACK reaction policy (`<channel>`: `telegram`, `discord`, `lark`, `feishu`).
+
+| Key | Default | Purpose |
+|---|---|---|
+| `enabled` | `true` | Master switch for ACK reactions on this channel |
+| `strategy` | `random` | Pool selection strategy: `random` or `first` |
+| `sample_rate` | `1.0` | Probabilistic gate in `[0.0, 1.0]` for channel fallback ACKs |
+| `emojis` | `[]` | Channel-level custom fallback pool (uses built-in pool when empty) |
+| `rules` | `[]` | Ordered conditional rules; first matching rule can react or suppress |
+
+Rule object fields (`[[channels_config.ack_reaction.<channel>.rules]]`):
+
+| Key | Default | Purpose |
+|---|---|---|
+| `enabled` | `true` | Enable/disable this single rule |
+| `contains_any` | `[]` | Match when message contains any keyword (case-insensitive) |
+| `contains_all` | `[]` | Match when message contains all keywords (case-insensitive) |
+| `contains_none` | `[]` | Match only when message contains none of these keywords |
+| `regex_any` | `[]` | Match when any regex pattern matches |
+| `regex_all` | `[]` | Match only when all regex patterns match |
+| `regex_none` | `[]` | Match only when none of these regex patterns match |
+| `sender_ids` | `[]` | Match only these sender IDs (`"*"` matches all) |
+| `chat_ids` | `[]` | Match only these chat/channel IDs (`"*"` matches all) |
+| `chat_types` | `[]` | Restrict to `group` and/or `direct` |
+| `locale_any` | `[]` | Restrict by locale tag (prefix supported, e.g. `zh`) |
+| `action` | `react` | `react` to emit ACK, `suppress` to force no ACK when matched |
+| `sample_rate` | unset | Optional rule-level gate in `[0.0, 1.0]` (overrides channel `sample_rate`) |
+| `strategy` | unset | Optional per-rule strategy override |
+| `emojis` | `[]` | Emoji pool used when this rule matches |
+
+Example:
+
+```toml
+[channels_config.ack_reaction.telegram]
+enabled = true
+strategy = "random"
+sample_rate = 1.0
+emojis = ["✅", "👌", "🔥"]
+
+[[channels_config.ack_reaction.telegram.rules]]
+contains_any = ["deploy", "release"]
+contains_none = ["dry-run"]
+regex_none = ["panic|fatal"]
+chat_ids = ["-100200300"]
+chat_types = ["group"]
+strategy = "first"
+sample_rate = 0.9
+emojis = ["🚀"]
+
+[[channels_config.ack_reaction.telegram.rules]]
+contains_any = ["error", "failed"]
+action = "suppress"
+sample_rate = 1.0
+```
 
 ### `[channels_config.nostr]`
 
