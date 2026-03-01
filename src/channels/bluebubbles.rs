@@ -463,37 +463,49 @@ impl BlueBubblesChannel {
             .collect()
     }
 
-    /// Resolve the local filesystem path where BlueBubbles stores the converted
-    /// MP3 for a given attachment GUID.
+    /// Find the converted audio file BlueBubbles stored for a given attachment GUID.
     ///
-    /// BB converts iMessage CAF voice memos to MP3 at:
-    ///   `~/Library/Application Support/bluebubbles-server/Convert/{GUID}/{transferName}.mp3`
+    /// BB converts iMessage CAF voice memos to MP3 and stores them at:
+    ///   `~/Library/Application Support/bluebubbles-server/Convert/{GUID}/`
     ///
-    /// Since ZeroClaw runs on the same Mac as BlueBubbles, we read this file
-    /// directly — no network download required.
-    fn bb_converted_mp3_path(guid: &str, transfer_name: &str) -> std::path::PathBuf {
+    /// The exact filename varies (e.g. `Audio Message.caf.mp3`). Scanning the
+    /// directory is more robust than constructing the name from `transferName`.
+    fn find_bb_converted_audio(guid: &str) -> Option<std::path::PathBuf> {
         let home = std::env::var("HOME").unwrap_or_default();
-        let mp3_name = format!("{transfer_name}.mp3");
-        std::path::PathBuf::from(home)
+        let dir = std::path::PathBuf::from(home)
             .join("Library/Application Support/bluebubbles-server/Convert")
-            .join(guid)
-            .join(mp3_name)
+            .join(guid);
+        let entries = std::fs::read_dir(&dir).ok()?;
+        entries.flatten().find_map(|e| {
+            let p = e.path();
+            let ext = p
+                .extension()
+                .and_then(|x| x.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            // Accept any common audio format BB might produce
+            if matches!(ext.as_str(), "mp3" | "m4a" | "aac" | "wav" | "ogg") {
+                Some(p)
+            } else {
+                None
+            }
+        })
     }
 
     /// Transcribe an audio attachment using the local `whisper` CLI.
     ///
-    /// Reads the BB-converted MP3 directly from the local filesystem.
+    /// Reads the BB-converted audio file directly from the local filesystem.
     /// Returns `Ok(None)` when the transcript is empty (e.g. silence).
     async fn transcribe_local(att: &AudioAttachment) -> anyhow::Result<Option<String>> {
-        let path = Self::bb_converted_mp3_path(&att.guid, &att.transfer_name);
-        let path_str = path.to_str().unwrap_or("");
+        let path = Self::find_bb_converted_audio(&att.guid).ok_or_else(|| {
+            anyhow::anyhow!(
+                "BB converted audio not found for GUID {} — BB may not have finished converting",
+                att.guid
+            )
+        })?;
 
-        anyhow::ensure!(
-            path.exists(),
-            "BB converted MP3 not found at {path_str} — BB may not have finished converting"
-        );
-
-        let transcript = super::transcription::transcribe_audio_local(path_str).await?;
+        let transcript =
+            super::transcription::transcribe_audio_local(path.to_str().unwrap_or("")).await?;
         if transcript.trim().is_empty() {
             return Ok(None);
         }
