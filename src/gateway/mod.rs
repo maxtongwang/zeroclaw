@@ -8,6 +8,7 @@
 //! - Header sanitization (handled by axum/hyper)
 
 pub mod api;
+pub mod oauth;
 mod openai_compat;
 mod openclaw_compat;
 pub mod sse;
@@ -31,7 +32,7 @@ use crate::util::truncate_with_ellipsis;
 use anyhow::{Context, Result};
 use axum::{
     body::{Body, Bytes},
-    extract::{ConnectInfo, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
     routing::{delete, get, post, put},
@@ -533,12 +534,15 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
     // BlueBubbles channel (if configured)
     let bluebubbles_channel: Option<Arc<BlueBubblesChannel>> =
         config.channels_config.bluebubbles.as_ref().map(|bb| {
-            Arc::new(BlueBubblesChannel::new(
-                bb.server_url.clone(),
-                bb.password.clone(),
-                bb.allowed_senders.clone(),
-                bb.ignore_senders.clone(),
-            ))
+            Arc::new(
+                BlueBubblesChannel::new(
+                    bb.server_url.clone(),
+                    bb.password.clone(),
+                    bb.allowed_senders.clone(),
+                    bb.ignore_senders.clone(),
+                )
+                .with_transcription(config.transcription.clone()),
+            )
         });
     let bluebubbles_webhook_secret: Option<Arc<str>> = config
         .channels_config
@@ -553,12 +557,15 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .bluebubbles_personal
         .as_ref()
         .map(|bb| {
-            Arc::new(BlueBubblesChannel::new(
-                bb.server_url.clone(),
-                bb.password.clone(),
-                bb.allowed_senders.clone(),
-                bb.ignore_senders.clone(),
-            ))
+            Arc::new(
+                BlueBubblesChannel::new(
+                    bb.server_url.clone(),
+                    bb.password.clone(),
+                    bb.allowed_senders.clone(),
+                    bb.ignore_senders.clone(),
+                )
+                .with_transcription(config.transcription.clone()),
+            )
         });
 
     // WATI channel (if configured)
@@ -840,6 +847,11 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/api/cli-tools", get(api::handle_api_cli_tools))
         .route("/api/health", get(api::handle_api_health))
         .route("/api/node-control", post(handle_node_control))
+        // ── OAuth connect routes ──
+        .route("/auth/status", get(oauth::handle_auth_status))
+        .route("/auth/{service}", get(oauth::handle_auth_start))
+        .route("/auth/{service}", delete(oauth::handle_auth_revoke))
+        .route("/auth/{service}/callback", get(oauth::handle_auth_callback))
         // ── SSE event stream ──
         .route("/api/events", get(sse::handle_sse_events))
         // ── WebSocket agent chat ──
@@ -2128,8 +2140,10 @@ async fn handle_bluebubbles_webhook(
         );
     };
 
-    // Parse messages from the webhook payload
-    let messages = bluebubbles.parse_webhook_payload(&payload);
+    // Parse messages from the webhook payload (transcribes audio if configured)
+    let messages = bluebubbles
+        .parse_webhook_payload_with_transcription(&payload)
+        .await;
 
     if messages.is_empty() {
         // Acknowledge the webhook even if no messages (could be non-message events)
@@ -2210,7 +2224,7 @@ async fn handle_bluebubbles_personal_webhook(
         );
     };
 
-    let messages = bb.parse_webhook_payload(&payload);
+    let messages = bb.parse_webhook_payload_with_transcription(&payload).await;
 
     for msg in &messages {
         tracing::info!(
