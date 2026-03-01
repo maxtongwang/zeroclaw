@@ -865,4 +865,147 @@ mod tests {
         assert_eq!(tool.get_next_api_key().as_deref(), Some("k2"));
         assert_eq!(tool.get_next_api_key().as_deref(), Some("k1"));
     }
+
+    // Helper that builds a tool allowing loopback so wiremock tests work.
+    fn test_tool_loopback() -> WebFetchTool {
+        let security = Arc::new(SecurityPolicy {
+            autonomy: AutonomyLevel::Supervised,
+            ..SecurityPolicy::default()
+        });
+        WebFetchTool::new(
+            security,
+            "fast_html2md".to_string(),
+            None,
+            None,
+            vec!["*".to_string()],
+            vec![],
+            UrlAccessConfig {
+                allow_loopback: true,
+                ..UrlAccessConfig::default()
+            },
+            500_000,
+            30,
+            "ZeroClaw/1.0".to_string(),
+        )
+    }
+
+    /// Redirect response without a Location header must produce a clear error.
+    #[tokio::test]
+    async fn redirect_missing_location_returns_error() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(302))
+            .mount(&server)
+            .await;
+
+        let tool = test_tool_loopback();
+        let result = tool
+            .execute(serde_json::json!({"url": server.uri()}))
+            .await
+            .unwrap();
+
+        assert!(!result.success, "expected failure when Location is missing");
+        let error = result.error.unwrap_or_default();
+        assert!(
+            error.contains("Location"),
+            "error should mention Location, got: {error}"
+        );
+    }
+
+    /// Redirect to a blocked domain must be rejected by validate_url.
+    #[tokio::test]
+    async fn redirect_to_blocked_domain_is_rejected() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Redirect to an explicitly blocked domain.
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", "https://blocked.example.com/secret"),
+            )
+            .mount(&server)
+            .await;
+
+        let security = Arc::new(SecurityPolicy {
+            autonomy: AutonomyLevel::Supervised,
+            ..SecurityPolicy::default()
+        });
+        let tool = WebFetchTool::new(
+            security,
+            "fast_html2md".to_string(),
+            None,
+            None,
+            vec!["*".to_string()],
+            vec!["blocked.example.com".to_string()],
+            UrlAccessConfig {
+                allow_loopback: true,
+                ..UrlAccessConfig::default()
+            },
+            500_000,
+            30,
+            "ZeroClaw/1.0".to_string(),
+        );
+
+        let result = tool
+            .execute(serde_json::json!({"url": server.uri()}))
+            .await
+            .unwrap();
+
+        assert!(
+            !result.success,
+            "expected rejection for blocked redirect target"
+        );
+        let error = result.error.unwrap_or_default();
+        assert!(
+            error.contains("blocked") || error.contains("denied") || error.contains("not allowed"),
+            "error should indicate blocking, got: {error}"
+        );
+    }
+
+    /// One-hop-only: a redirect that itself returns another 3xx must not be followed.
+    #[tokio::test]
+    async fn redirect_only_follows_one_hop() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let hop2_url = format!("{}/hop2", server.uri());
+
+        // First request returns 302 → /hop2.
+        Mock::given(method("GET"))
+            .and(path("/hop1"))
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", hop2_url.as_str()))
+            .mount(&server)
+            .await;
+
+        // /hop2 returns another 302 — should NOT be followed.
+        Mock::given(method("GET"))
+            .and(path("/hop2"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{}/hop3", server.uri()).as_str()),
+            )
+            .mount(&server)
+            .await;
+
+        let tool = test_tool_loopback();
+        let result = tool
+            .execute(serde_json::json!({"url": format!("{}/hop1", server.uri())}))
+            .await
+            .unwrap();
+
+        // The second 3xx is not followed; fetch_with_http_provider detects a
+        // non-success status and returns an error.
+        assert!(!result.success, "second redirect should not be followed");
+        let error = result.error.unwrap_or_default();
+        assert!(
+            error.contains("302") || error.contains("Found") || error.contains("redirect"),
+            "error should reference the second redirect status, got: {error}"
+        );
+    }
 }
