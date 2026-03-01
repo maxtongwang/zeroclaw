@@ -57,7 +57,7 @@ pub async fn transcribe_audio_local(file_path: &str) -> anyhow::Result<String> {
         .await
         .context("Failed to create whisper temp dir")?;
 
-    let status = Command::new(whisper_bin)
+    let output = Command::new(whisper_bin)
         .args([
             "--model",
             "turbo",
@@ -69,15 +69,18 @@ pub async fn transcribe_audio_local(file_path: &str) -> anyhow::Result<String> {
             "False",
             file_path,
         ])
-        .stderr(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .status()
+        .output()
         .await
         .context("whisper CLI error")?;
 
-    if !status.success() {
+    if !output.status.success() {
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
-        anyhow::bail!("whisper CLI failed (exit {:?})", status.code());
+        // Log stderr so operators can diagnose missing models, OOM errors, etc.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.trim().is_empty() {
+            tracing::debug!("whisper stderr: {stderr}");
+        }
+        anyhow::bail!("whisper CLI failed (exit {:?})", output.status.code());
     }
 
     let stem = Path::new(file_path)
@@ -95,23 +98,36 @@ pub async fn transcribe_audio_local(file_path: &str) -> anyhow::Result<String> {
     Ok(text)
 }
 
+/// Return `true` if a local `whisper` binary is available in PATH or a common
+/// install location. Used by channel implementations to select a transcription
+/// backend without requiring an API key.
+pub fn whisper_available() -> bool {
+    resolve_whisper_bin().is_some()
+}
+
 /// Resolve the `whisper` binary path by checking PATH and common install locations.
+///
+/// Result is cached after the first call so subsequent invocations (e.g. on
+/// every audio webhook) do not spawn a `which` subprocess each time.
 fn resolve_whisper_bin() -> Option<&'static str> {
-    const CANDIDATES: &[&str] = &[
-        "whisper",
-        "/opt/homebrew/bin/whisper",
-        "/usr/local/bin/whisper",
-    ];
-    CANDIDATES.iter().copied().find(|bin| {
-        if bin.starts_with('/') {
-            std::path::Path::new(bin).is_file()
-        } else {
-            std::process::Command::new("which")
-                .arg(bin)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        }
+    static WHISPER_BIN: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *WHISPER_BIN.get_or_init(|| {
+        const CANDIDATES: &[&str] = &[
+            "whisper",
+            "/opt/homebrew/bin/whisper",
+            "/usr/local/bin/whisper",
+        ];
+        CANDIDATES.iter().copied().find(|bin| {
+            if bin.starts_with('/') {
+                std::path::Path::new(bin).is_file()
+            } else {
+                std::process::Command::new("which")
+                    .arg(bin)
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+            }
+        })
     })
 }
 
