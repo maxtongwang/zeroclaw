@@ -95,6 +95,13 @@ pub async fn transcribe_audio_local(file_path: &str) -> anyhow::Result<String> {
     Ok(text)
 }
 
+/// Return `true` if a local `whisper` binary is available in PATH or a common
+/// install location. Used by channel implementations to select a transcription
+/// backend without requiring an API key.
+pub fn whisper_available() -> bool {
+    resolve_whisper_bin().is_some()
+}
+
 /// Resolve the `whisper` binary path by checking PATH and common install locations.
 fn resolve_whisper_bin() -> Option<&'static str> {
     const CANDIDATES: &[&str] = &[
