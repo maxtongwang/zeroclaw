@@ -204,8 +204,10 @@ impl WebFetchTool {
     /// response body to text via the configured HTML provider.
     async fn fetch_with_http_provider(&self, url: &str) -> anyhow::Result<String> {
         let client = self.build_http_client()?;
-        let response = client.get(url).send().await?;
+        let mut response = client.get(url).send().await?;
 
+        // Client uses Policy::none() so redirects are not followed automatically.
+        // Handle one hop manually: resolve, validate, then fetch the target.
         if response.status().is_redirection() {
             let location = response
                 .headers()
@@ -221,7 +223,7 @@ impl WebFetchTool {
 
             // Validate redirect target with the same SSRF/allowlist policy.
             self.validate_url(&redirected_url)?;
-            return Ok(redirected_url);
+            response = client.get(&redirected_url).send().await?;
         }
 
         let status = response.status();
