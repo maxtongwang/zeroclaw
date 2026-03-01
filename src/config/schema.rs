@@ -290,6 +290,29 @@ pub struct Config {
     /// WASM plugin engine configuration (`[wasm]` section).
     #[serde(default)]
     pub wasm: WasmConfig,
+
+    /// OAuth provider configuration (`[oauth]`).
+    #[serde(default)]
+    pub oauth: OauthConfig,
+}
+
+/// OAuth provider credentials (`[oauth]`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct OauthConfig {
+    /// Google OAuth2 credentials.
+    #[serde(default)]
+    pub google: GoogleOauthConfig,
+}
+
+/// Google OAuth2 application credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct GoogleOauthConfig {
+    /// OAuth2 client ID.
+    #[serde(default)]
+    pub client_id: String,
+    /// OAuth2 client secret.
+    #[serde(default)]
+    pub client_secret: String,
 }
 
 /// Named provider profile definition compatible with Codex app-server style config.
@@ -5706,6 +5729,7 @@ impl Default for Config {
             mcp: McpConfig::default(),
             model_support_vision: None,
             wasm: WasmConfig::default(),
+            oauth: OauthConfig::default(),
         }
     }
 }
@@ -8921,6 +8945,7 @@ ws_url = "ws://127.0.0.1:3002"
             mcp: McpConfig::default(),
             model_support_vision: None,
             wasm: WasmConfig::default(),
+            oauth: OauthConfig::default(),
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -9293,6 +9318,7 @@ tool_dispatcher = "xml"
             mcp: McpConfig::default(),
             model_support_vision: None,
             wasm: WasmConfig::default(),
+            oauth: OauthConfig::default(),
         };
 
         config.save().await.unwrap();
