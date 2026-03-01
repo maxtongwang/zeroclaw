@@ -6,6 +6,19 @@ use uuid::Uuid;
 
 const FROM_ME_CACHE_MAX: usize = 500;
 
+/// Audio attachment metadata extracted from a BlueBubbles webhook payload.
+struct AudioAttachment {
+    /// BlueBubbles attachment GUID, used to download via the BB REST API.
+    ///
+    /// Note: BB attachment GUIDs (e.g. `p:0/UUID`) are BB-internal identifiers
+    /// distinct from iMessage's `attachment.guid` column in `chat.db`.
+    guid: String,
+    /// Original filename from the BB webhook (e.g. `"Audio Message.caf"`).
+    /// Used to derive the file extension when writing to a temp file and when
+    /// calling the Groq Whisper API (which validates the filename extension).
+    transfer_name: String,
+}
+
 /// Maps short effect names to full Apple `effectId` strings for BB Private API.
 const EFFECT_MAP: &[(&str, &str)] = &[
     // Bubble effects
@@ -136,6 +149,9 @@ pub struct BlueBubblesChannel {
     /// BB typing indicators expire in ~5 s; tasks refresh every 4 s.
     /// Keyed by chat GUID so concurrent conversations don't cancel each other.
     typing_handles: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    /// Optional Groq Whisper transcription config — populated by `with_transcription`
+    /// when `[transcription]` is configured and enabled.
+    transcription: Option<crate::config::TranscriptionConfig>,
 }
 
 impl BlueBubblesChannel {
@@ -150,10 +166,25 @@ impl BlueBubblesChannel {
             password,
             allowed_senders,
             ignore_senders,
-            client: reqwest::Client::new(),
+            client: reqwest::ClientBuilder::new()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("valid reqwest client config"),
             from_me_cache: Mutex::new(FromMeCache::new()),
             typing_handles: Mutex::new(HashMap::new()),
+            transcription: None,
         }
+    }
+
+    /// Configure voice transcription via Groq Whisper.
+    ///
+    /// When `config.enabled` is false the builder is a no-op so callers can
+    /// pass `config.transcription.clone()` unconditionally.
+    pub fn with_transcription(mut self, config: crate::config::TranscriptionConfig) -> Self {
+        if config.enabled {
+            self.transcription = Some(config);
+        }
+        self
     }
 
     /// Check if a sender address is in the ignore list.
@@ -409,7 +440,306 @@ impl BlueBubblesChannel {
         }
     }
 
+    /// Return the first audio `AudioAttachment` from a BB webhook `data` object.
+    ///
+    /// Supports both camelCase (`mimeType`, `transferName`) and snake_case
+    /// (`mime_type`, `filename`) field names for forward compatibility.
+    fn extract_audio_attachment(data: &serde_json::Value) -> Option<AudioAttachment> {
+        let arr = data.get("attachments").and_then(|a| a.as_array())?;
+        arr.iter().find_map(|att| {
+            let mime = att
+                .get("mimeType")
+                .or_else(|| att.get("mime_type"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("");
+            if !mime.starts_with("audio/") {
+                return None;
+            }
+            // BB attachment GUID is required to download via the REST API.
+            let guid = att.get("guid").and_then(|g| g.as_str())?.to_string();
+            let transfer_name = att
+                .get("transferName")
+                .or_else(|| att.get("filename"))
+                .and_then(|f| f.as_str())
+                .unwrap_or("voice.m4a")
+                .to_string();
+            Some(AudioAttachment {
+                guid,
+                transfer_name,
+            })
+        })
+    }
+
+    /// Download raw audio bytes for an attachment from the BlueBubbles server.
+    ///
+    /// Uses `GET /api/v1/attachment/{guid}/download`. The attachment GUID is
+    /// URL-encoded so `p:0/UUID`-style identifiers work as URL path segments.
+    ///
+    /// Enforces a 25 MB cap (matching the Groq Whisper API limit) both via the
+    /// `Content-Length` header (before buffering) and on the buffered body, to
+    /// prevent memory exhaustion from large or malicious attachments.
+    async fn download_attachment_bytes(&self, attachment_guid: &str) -> anyhow::Result<Vec<u8>> {
+        /// 25 MB — matches `transcription::MAX_AUDIO_BYTES`.
+        const MAX_BYTES: usize = 25 * 1024 * 1024;
+
+        let encoded = urlencoding::encode(attachment_guid);
+        let url = self.api_url(&format!("/api/v1/attachment/{encoded}/download"));
+        let resp = self
+            .client
+            .get(&url)
+            .query(&[("password", &self.password)])
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("BB attachment download request failed: {e}"))?;
+        if !resp.status().is_success() {
+            anyhow::bail!(
+                "BlueBubbles attachment download failed ({}): GUID={}",
+                resp.status(),
+                attachment_guid
+            );
+        }
+        // Reject before buffering when Content-Length already exceeds the cap.
+        if let Some(len) = resp.content_length() {
+            if usize::try_from(len).unwrap_or(usize::MAX) > MAX_BYTES {
+                anyhow::bail!("BB attachment too large ({len} bytes, max {MAX_BYTES})");
+            }
+        }
+        let bytes = resp.bytes().await?;
+        if bytes.len() > MAX_BYTES {
+            anyhow::bail!(
+                "BB attachment too large ({} bytes, max {MAX_BYTES})",
+                bytes.len()
+            );
+        }
+        Ok(bytes.to_vec())
+    }
+
+    /// Transcribe an audio attachment received via the BlueBubbles webhook.
+    ///
+    /// Downloads the raw audio bytes via the BB REST API, writes them to a
+    /// temporary file, and transcribes using the local `whisper` CLI. Falls
+    /// back to the Groq Whisper API when whisper is not installed and an API
+    /// key is configured via `[transcription]`.
+    ///
+    /// Returns `Ok(None)` when the transcript is empty (e.g. silence).
+    async fn transcribe_local(&self, att: &AudioAttachment) -> anyhow::Result<Option<String>> {
+        let bytes = self.download_attachment_bytes(&att.guid).await?;
+
+        // Derive the file extension from the transfer name; default to m4a.
+        let ext = std::path::Path::new(&att.transfer_name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("m4a");
+
+        // Local whisper handles CAF (iMessage voice memos) and any format
+        // supported by ffmpeg — no pre-conversion step needed.
+        if super::transcription::whisper_available() {
+            let tmp_path = std::env::temp_dir().join(format!(
+                "zc_bb_audio_{}.{ext}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            tokio::fs::write(&tmp_path, &bytes).await?;
+            let result =
+                super::transcription::transcribe_audio_local(tmp_path.to_str().unwrap_or("")).await;
+            // Clean up temp file regardless of result.
+            tokio::fs::remove_file(&tmp_path).await.ok();
+            let transcript = result?;
+            if transcript.trim().is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(transcript));
+        }
+
+        // Groq API fallback: BB typically serves converted MP3 for iMessage
+        // voice memos, but raw CAF files are rejected by the Groq API. Give a
+        // clear error rather than the generic "Unsupported audio format" message.
+        if let Some(ref config) = self.transcription {
+            if std::path::Path::new(&att.transfer_name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("caf"))
+                .unwrap_or(false)
+            {
+                anyhow::bail!(
+                    "CAF audio is not supported by the Groq API fallback — \
+                     install openai-whisper (`pip install openai-whisper`) for local transcription"
+                );
+            }
+            let transcript =
+                super::transcription::transcribe_audio(bytes, &att.transfer_name, config).await?;
+            if transcript.trim().is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(transcript));
+        }
+
+        anyhow::bail!(
+            "No transcription backend available: install openai-whisper \
+             (`pip install openai-whisper`) or configure [transcription].api_key"
+        )
+    }
+
+    /// Like `parse_webhook_payload` but transcribes audio attachments when
+    /// `[transcription]` is configured. Gracefully falls back to the
+    /// `<media:audio>` placeholder if transcription is disabled, whisper is
+    /// absent, or transcription fails.
+    pub async fn parse_webhook_payload_with_transcription(
+        &self,
+        payload: &serde_json::Value,
+    ) -> Vec<ChannelMessage> {
+        if self.transcription.is_none() {
+            return self.parse_webhook_payload(payload);
+        }
+
+        let event_type = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let Some(data) = payload.get("data") else {
+            return self.parse_webhook_payload(payload);
+        };
+
+        if event_type != "new-message" {
+            return self.parse_webhook_payload(payload);
+        }
+
+        let Some(att) = Self::extract_audio_attachment(data) else {
+            return self.parse_webhook_payload(payload);
+        };
+
+        // Start typing indicator before whisper runs — transcription can take >30 s
+        // and without this the user sees no feedback during the slow CPU phase.
+        if let Some(chat_guid) = Self::extract_chat_guid(data) {
+            let _ = self.start_typing(&chat_guid).await;
+        }
+
+        match self.transcribe_local(&att).await {
+            Ok(Some(transcript)) => {
+                // Inject transcript as text; clear attachments so parse_webhook_payload
+                // skips the <media:audio> placeholder
+                let mut enriched = data.clone();
+                if let Some(obj) = enriched.as_object_mut() {
+                    let existing = obj
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let new_text = if existing.is_empty() {
+                        format!("[Voice] {transcript}")
+                    } else {
+                        format!("{existing}\n[Voice] {transcript}")
+                    };
+                    obj.insert("text".into(), serde_json::Value::String(new_text));
+                    obj.insert("attachments".into(), serde_json::Value::Array(vec![]));
+                }
+                let enriched_payload = serde_json::json!({"type": "new-message", "data": enriched});
+                self.parse_webhook_payload(&enriched_payload)
+            }
+            Ok(None) => self.parse_webhook_payload(payload),
+            Err(e) => {
+                tracing::warn!("BB audio transcription failed: {e}");
+                self.parse_webhook_payload(payload)
+            }
+        }
+    }
+
+    /// Parse a `type: "updated-message"` webhook for tapback reactions.
+    ///
+    /// BlueBubbles sends these when a user adds a tapback (love, like, dislike,
+    /// laugh, emphasize, question) to any message. The `associatedMessageType`
+    /// field indicates the reaction:
+    ///   - 2000–2005 = tapback additions (love / like / dislike / laugh / emphasize / question)
+    ///   - 3000–3005 = tapback removals (silently ignored)
+    ///
+    /// Tapbacks from the bot itself are discarded. Tapbacks on bot messages
+    /// include a quoted excerpt of the original body when it is in the reply cache.
+    fn parse_tapback_event(&self, data: &serde_json::Value) -> Vec<ChannelMessage> {
+        let associated_type = data
+            .get("associatedMessageType")
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0);
+
+        let tapback_label = match associated_type {
+            2000 => "\u{2764}\u{FE0F} Loved",      // ❤️
+            2001 => "\u{1F44D} Liked",             // 👍
+            2002 => "\u{1F44E} Disliked",          // 👎
+            2003 => "\u{1F602} Laughed at",        // 😂
+            2004 => "\u{203C}\u{FE0F} Emphasized", // ‼️
+            2005 => "\u{2753} Questioned",         // ❓
+            // 3000–3005 are removal tapbacks; ignore silently.
+            3000..=3005 => return vec![],
+            // 0 indicates a non-tapback updated-message (read receipt, delivery, etc.).
+            0 => {
+                tracing::debug!(
+                    "BlueBubbles: updated-message is not a tapback (associatedMessageType=0)"
+                );
+                return vec![];
+            }
+            // Unknown types may indicate a new BB API version; log for diagnosis.
+            _ => {
+                tracing::debug!(
+                    "BlueBubbles: unknown associatedMessageType {associated_type}, skipping"
+                );
+                return vec![];
+            }
+        };
+
+        let is_from_me = data
+            .get("isFromMe")
+            .or_else(|| data.get("is_from_me"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if is_from_me {
+            return vec![];
+        }
+
+        let Some(sender) = Self::extract_sender(data) else {
+            return vec![];
+        };
+        if self.is_sender_ignored(&sender) {
+            return vec![];
+        }
+        if !self.is_sender_allowed(&sender) {
+            return vec![];
+        }
+
+        let reply_target = Self::extract_chat_guid(data)
+            .filter(|g| !g.is_empty())
+            .unwrap_or_else(|| sender.clone());
+
+        // If the reacted-to message was from the bot, include a quoted excerpt.
+        // `lookup_reply_context` returns None for unknown or empty GUIDs, so no
+        // separate empty-check is needed here.
+        let original_guid = data
+            .get("associatedMessageGuid")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let context = self
+            .lookup_reply_context(original_guid)
+            .map(|body| format!(" on \"{body}\""))
+            .unwrap_or_default();
+
+        let content = format!("[Tapback] {tapback_label}{context}");
+        let id = Self::extract_message_id(data).unwrap_or_else(|| Uuid::new_v4().to_string());
+        let timestamp = Self::extract_timestamp(data);
+
+        vec![ChannelMessage {
+            id,
+            sender,
+            reply_target,
+            content,
+            channel: "bluebubbles".to_string(),
+            timestamp,
+            thread_ts: None,
+        }]
+    }
+
     /// Parse an incoming webhook payload from BlueBubbles and extract messages.
+    ///
+    /// Handles two event types:
+    /// - `"new-message"` — standard inbound messages (text + attachments)
+    /// - `"updated-message"` — tapback reactions, surfaced as system events
     ///
     /// BlueBubbles webhook envelope:
     /// ```json
@@ -433,6 +763,15 @@ impl BlueBubblesChannel {
         let mut messages = Vec::new();
 
         let event_type = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        // Handle tapback reactions from updated-message events.
+        if event_type == "updated-message" {
+            let Some(data) = payload.get("data") else {
+                return messages;
+            };
+            return self.parse_tapback_event(data);
+        }
+
         if event_type != "new-message" {
             tracing::debug!("BlueBubbles: skipping non-message event: {event_type}");
             return messages;
@@ -522,6 +861,34 @@ impl BlueBubblesChannel {
         });
 
         messages
+    }
+}
+
+/// Map a Unicode emoji (or short alias) to a BlueBubbles Private API tapback
+/// reaction name.
+///
+/// BB Private API accepts these names: `"love"`, `"like"`, `"dislike"`,
+/// `"laugh"`, `"emphasize"`, `"question"`. Removal uses the `"-"` prefix
+/// (e.g. `"-love"`).
+fn emoji_to_bb_tapback(emoji: &str) -> Option<&'static str> {
+    // ❤️ / ♥️ / 🥰 / 😍 → love
+    // 👍 / ✅ / +1 → like
+    // 👎 / -1 → dislike
+    // 😂 / 🤣 / 😆 → laugh
+    // ‼️ / ❗ / ❕ / 🔥 → emphasize
+    // ❓ / ❔ / 🤔 → question
+    match emoji {
+        "\u{2764}\u{FE0F}" | "\u{2665}\u{FE0F}" | "\u{1F970}" | "\u{1F60D}" | "love" => {
+            Some("love")
+        }
+        "\u{1F44D}" | "\u{2705}" | "+1" | "like" => Some("like"),
+        "\u{1F44E}" | "dislike" | "-1" => Some("dislike"),
+        "\u{1F602}" | "\u{1F923}" | "\u{1F606}" | "laugh" | "haha" => Some("laugh"),
+        "\u{203C}\u{FE0F}" | "\u{2757}" | "\u{2755}" | "emphasize" | "wow" | "\u{1F525}" => {
+            Some("emphasize")
+        }
+        "\u{2753}" | "\u{2754}" | "\u{1F914}" | "question" => Some("question"),
+        _ => None,
     }
 }
 
@@ -765,7 +1132,7 @@ impl Channel for BlueBubblesChannel {
         // Append effectId if present
         if let Some(ref eid) = effect_id {
             body.as_object_mut()
-                .unwrap()
+                .expect("serde_json::json!({}) always produces an object")
                 .insert("effectId".into(), serde_json::Value::String(eid.clone()));
         }
 
@@ -849,6 +1216,89 @@ impl Channel for BlueBubblesChannel {
             .await
             .map(|r| r.status().is_success())
             .unwrap_or(false)
+    }
+
+    /// Add a tapback reaction to a message via the BlueBubbles Private API.
+    ///
+    /// `channel_id` is the chat GUID (e.g. `iMessage;-;+15551234567`).
+    /// `message_id` is the BB message GUID (e.g. `p:0/UUID`).
+    /// `emoji` is a Unicode emoji or short alias (see `emoji_to_bb_tapback`).
+    ///
+    /// Supported reactions: ❤️ 👍 👎 😂 ‼️ ❓ (and string aliases).
+    async fn add_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> anyhow::Result<()> {
+        let Some(reaction) = emoji_to_bb_tapback(emoji) else {
+            anyhow::bail!(
+                "Unsupported tapback emoji '{emoji}' — supported: \
+                 \u{2764}\u{FE0F} \u{1F44D} \u{1F44E} \u{1F602} \u{203C}\u{FE0F} \u{2753}"
+            );
+        };
+        let url = self.api_url("/api/v1/message/react");
+        let body = serde_json::json!({
+            "chatGuid": channel_id,
+            "selectedMessageGuid": message_id,
+            "reaction": reaction,
+            "method": "private-api",
+        });
+        let resp = self
+            .client
+            .post(&url)
+            .query(&[("password", &self.password)])
+            .json(&body)
+            .send()
+            .await?;
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        let status = resp.status();
+        let error_body = resp.text().await.unwrap_or_default();
+        let sanitized = crate::providers::sanitize_api_error(&error_body);
+        tracing::error!("BlueBubbles add_reaction failed: {status} — {sanitized}");
+        anyhow::bail!("BlueBubbles tapback failed: {status}");
+    }
+
+    /// Remove a tapback reaction from a message via the BlueBubbles Private API.
+    ///
+    /// BB uses a `"-"` prefix convention for removal (e.g. `"-love"` removes
+    /// a previously added love tapback).
+    async fn remove_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> anyhow::Result<()> {
+        let Some(reaction) = emoji_to_bb_tapback(emoji) else {
+            anyhow::bail!(
+                "Unsupported tapback emoji '{emoji}' — supported: \
+                 \u{2764}\u{FE0F} \u{1F44D} \u{1F44E} \u{1F602} \u{203C}\u{FE0F} \u{2753}"
+            );
+        };
+        let url = self.api_url("/api/v1/message/react");
+        let body = serde_json::json!({
+            "chatGuid": channel_id,
+            "selectedMessageGuid": message_id,
+            "reaction": format!("-{reaction}"),
+            "method": "private-api",
+        });
+        let resp = self
+            .client
+            .post(&url)
+            .query(&[("password", &self.password)])
+            .json(&body)
+            .send()
+            .await?;
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        let status = resp.status();
+        let error_body = resp.text().await.unwrap_or_default();
+        let sanitized = crate::providers::sanitize_api_error(&error_body);
+        tracing::error!("BlueBubbles remove_reaction failed: {status} — {sanitized}");
+        anyhow::bail!("BlueBubbles remove tapback failed: {status}");
     }
 }
 
@@ -1465,43 +1915,257 @@ mod tests {
             "http://localhost:1234".into(),
             "pw".into(),
             vec!["*".into()],
-            vec!["bot@example.com".into()],
+            vec!["+1_999_000_0000".into()],
         );
-        assert!(ch.is_sender_ignored("bot@example.com"));
-        assert!(ch.is_sender_ignored("BOT@EXAMPLE.COM")); // case-insensitive
-        assert!(!ch.is_sender_ignored("+1234567890"));
+        assert!(ch.is_sender_ignored("+1_999_000_0000"));
+        assert!(!ch.is_sender_ignored("+1_234_567_890"));
     }
 
     #[test]
     fn bluebubbles_ignore_sender_takes_precedence_over_allowlist() {
+        // A sender in both ignore_senders and allowed_senders must be dropped.
         let ch = BlueBubblesChannel::new(
             "http://localhost:1234".into(),
             "pw".into(),
-            vec!["bot@example.com".into()], // explicitly allowed
-            vec!["bot@example.com".into()], // but also ignored
+            vec!["+1_999_000_0000".into()],
+            vec!["+1_999_000_0000".into()],
         );
-        let payload = serde_json::json!({
-            "type": "new-message",
-            "data": {
-                "guid": "p:0/abc",
-                "text": "hello",
-                "isFromMe": false,
-                "handle": { "address": "bot@example.com" },
-                "chats": [{ "guid": "iMessage;-;bot@example.com", "style": 45 }],
-                "attachments": []
-            }
-        });
-        let msgs = ch.parse_webhook_payload(&payload);
-        assert!(
-            msgs.is_empty(),
-            "ignore_senders must take precedence over allowed_senders"
-        );
+        assert!(ch.is_sender_ignored("+1_999_000_0000"));
     }
 
     #[test]
     fn bluebubbles_ignore_sender_empty_list_ignores_nothing() {
         let ch = make_open_channel(); // ignore_senders = []
-        assert!(!ch.is_sender_ignored("+1234567890"));
+        assert!(!ch.is_sender_ignored("+1_234_567_890"));
         assert!(!ch.is_sender_ignored("anyone@example.com"));
+    }
+
+    #[test]
+    fn extract_audio_attachment_detects_audio() {
+        let data = serde_json::json!({
+            "attachments": [{
+                "guid": "p:0/B7C54F16-3F8B-4B03-A5D5-E9C29D6E9E4E",
+                "mimeType": "audio/mpeg",
+                "transferName": "Audio Message.mp3"
+            }]
+        });
+        let att = BlueBubblesChannel::extract_audio_attachment(&data).unwrap();
+        // Uses the BB attachment GUID (not the message GUID) for REST API download.
+        assert_eq!(att.guid, "p:0/B7C54F16-3F8B-4B03-A5D5-E9C29D6E9E4E");
+        assert_eq!(att.transfer_name, "Audio Message.mp3");
+    }
+
+    #[test]
+    fn extract_audio_attachment_detects_caf() {
+        // CAF (Core Audio Format) is the native iMessage voice memo format.
+        let data = serde_json::json!({
+            "attachments": [{
+                "guid": "p:0/A1B2C3D4-E5F6-7890-ABCD-EF1234567890",
+                "mimeType": "audio/x-caf",
+                "transferName": "Audio Message.caf"
+            }]
+        });
+        let att = BlueBubblesChannel::extract_audio_attachment(&data).unwrap();
+        assert_eq!(att.guid, "p:0/A1B2C3D4-E5F6-7890-ABCD-EF1234567890");
+        assert_eq!(att.transfer_name, "Audio Message.caf");
+    }
+
+    #[test]
+    fn extract_audio_attachment_skips_missing_guid() {
+        // No attachment guid → cannot download via REST API; must be skipped.
+        let data = serde_json::json!({
+            "attachments": [{"mimeType": "audio/mpeg", "transferName": "voice.mp3"}]
+        });
+        assert!(BlueBubblesChannel::extract_audio_attachment(&data).is_none());
+    }
+
+    #[test]
+    fn extract_audio_attachment_skips_non_audio() {
+        let data = serde_json::json!({
+            "attachments": [{
+                "guid": "p:0/abc",
+                "mimeType": "image/png",
+                "transferName": "photo.png"
+            }]
+        });
+        assert!(BlueBubblesChannel::extract_audio_attachment(&data).is_none());
+    }
+
+    #[test]
+    fn extract_audio_attachment_returns_first_audio_only() {
+        // Multiple attachments: first image, then audio — must return the audio.
+        let data = serde_json::json!({
+            "attachments": [
+                { "guid": "p:0/img", "mimeType": "image/jpeg", "transferName": "photo.jpg" },
+                { "guid": "p:0/audio", "mimeType": "audio/mpeg", "transferName": "voice.mp3" }
+            ]
+        });
+        let att = BlueBubblesChannel::extract_audio_attachment(&data).unwrap();
+        assert_eq!(att.guid, "p:0/audio");
+    }
+
+    // -- emoji_to_bb_tapback tests --
+
+    #[test]
+    fn emoji_to_bb_tapback_maps_heart_to_love() {
+        assert_eq!(emoji_to_bb_tapback("❤️"), Some("love"));
+        assert_eq!(emoji_to_bb_tapback("love"), Some("love"));
+    }
+
+    #[test]
+    fn emoji_to_bb_tapback_maps_thumbs_up_to_like() {
+        assert_eq!(emoji_to_bb_tapback("👍"), Some("like"));
+        assert_eq!(emoji_to_bb_tapback("+1"), Some("like"));
+    }
+
+    #[test]
+    fn emoji_to_bb_tapback_maps_thumbs_down_to_dislike() {
+        assert_eq!(emoji_to_bb_tapback("👎"), Some("dislike"));
+        assert_eq!(emoji_to_bb_tapback("-1"), Some("dislike"));
+    }
+
+    #[test]
+    fn emoji_to_bb_tapback_maps_laugh() {
+        assert_eq!(emoji_to_bb_tapback("😂"), Some("laugh"));
+        assert_eq!(emoji_to_bb_tapback("haha"), Some("laugh"));
+    }
+
+    #[test]
+    fn emoji_to_bb_tapback_maps_emphasize() {
+        assert_eq!(emoji_to_bb_tapback("‼️"), Some("emphasize"));
+        assert_eq!(emoji_to_bb_tapback("emphasize"), Some("emphasize"));
+    }
+
+    #[test]
+    fn emoji_to_bb_tapback_maps_question() {
+        assert_eq!(emoji_to_bb_tapback("❓"), Some("question"));
+        assert_eq!(emoji_to_bb_tapback("question"), Some("question"));
+    }
+
+    #[test]
+    fn emoji_to_bb_tapback_returns_none_for_unknown() {
+        assert_eq!(emoji_to_bb_tapback("🎉"), None);
+        assert_eq!(emoji_to_bb_tapback("hello"), None);
+        assert_eq!(emoji_to_bb_tapback(""), None);
+    }
+
+    // -- parse_tapback_event / updated-message tests --
+
+    #[test]
+    fn bluebubbles_parse_tapback_love() {
+        let ch = make_open_channel();
+        let payload = serde_json::json!({
+            "type": "updated-message",
+            "data": {
+                "guid": "p:0/tapback-guid",
+                "associatedMessageType": 2000,
+                "associatedMessageGuid": "p:0/original",
+                "isFromMe": false,
+                "dateCreated": 1_708_987_654_000_u64,
+                "handle": { "address": "+1_234_567_890" },
+                "chats": [{ "guid": "iMessage;-;+1_234_567_890" }]
+            }
+        });
+        let msgs = ch.parse_webhook_payload(&payload);
+        assert_eq!(msgs.len(), 1);
+        assert!(
+            msgs[0].content.contains("Loved"),
+            "expected 'Loved' in tapback content: {}",
+            msgs[0].content
+        );
+        assert_eq!(msgs[0].sender, "+1_234_567_890");
+    }
+
+    #[test]
+    fn bluebubbles_parse_tapback_like_on_bot_message() {
+        let ch = make_open_channel();
+        // Seed the bot's message in the from-me cache.
+        ch.cache_from_me("p:0/original", "iMessage;-;+1_234_567_890", "Great idea!");
+
+        let payload = serde_json::json!({
+            "type": "updated-message",
+            "data": {
+                "guid": "p:0/tapback-guid",
+                "associatedMessageType": 2001,
+                "associatedMessageGuid": "p:0/original",
+                "isFromMe": false,
+                "dateCreated": 1_708_987_654_000_u64,
+                "handle": { "address": "+1_234_567_890" },
+                "chats": [{ "guid": "iMessage;-;+1_234_567_890" }]
+            }
+        });
+        let msgs = ch.parse_webhook_payload(&payload);
+        assert_eq!(msgs.len(), 1);
+        assert!(
+            msgs[0].content.contains("Liked"),
+            "expected 'Liked' in tapback content: {}",
+            msgs[0].content
+        );
+        assert!(
+            msgs[0].content.contains("Great idea!"),
+            "expected quoted bot message body in content: {}",
+            msgs[0].content
+        );
+    }
+
+    #[test]
+    fn bluebubbles_parse_tapback_removal_ignored() {
+        // associatedMessageType 3000–3005 = removal; should produce no messages.
+        let ch = make_open_channel();
+        let payload = serde_json::json!({
+            "type": "updated-message",
+            "data": {
+                "guid": "p:0/removal",
+                "associatedMessageType": 3000,
+                "isFromMe": false,
+                "dateCreated": 1_708_987_654_000_u64,
+                "handle": { "address": "+1_234_567_890" },
+                "chats": [{ "guid": "iMessage;-;+1_234_567_890" }]
+            }
+        });
+        let msgs = ch.parse_webhook_payload(&payload);
+        assert!(
+            msgs.is_empty(),
+            "tapback removals should produce no messages"
+        );
+    }
+
+    #[test]
+    fn bluebubbles_parse_tapback_from_me_ignored() {
+        let ch = make_open_channel();
+        let payload = serde_json::json!({
+            "type": "updated-message",
+            "data": {
+                "guid": "p:0/my-tapback",
+                "associatedMessageType": 2000,
+                "isFromMe": true,
+                "dateCreated": 1_708_987_654_000_u64,
+                "handle": { "address": "+1_234_567_890" },
+                "chats": [{ "guid": "iMessage;-;+1_234_567_890" }]
+            }
+        });
+        let msgs = ch.parse_webhook_payload(&payload);
+        assert!(msgs.is_empty(), "fromMe tapbacks should be ignored");
+    }
+
+    #[test]
+    fn bluebubbles_parse_tapback_unauthorized_sender_ignored() {
+        let ch = make_channel(); // only allows +1_234_567_890
+        let payload = serde_json::json!({
+            "type": "updated-message",
+            "data": {
+                "guid": "p:0/unauthorized-tapback",
+                "associatedMessageType": 2001,
+                "isFromMe": false,
+                "dateCreated": 1_708_987_654_000_u64,
+                "handle": { "address": "+9_999_999_999" },
+                "chats": [{ "guid": "iMessage;-;+9_999_999_999" }]
+            }
+        });
+        let msgs = ch.parse_webhook_payload(&payload);
+        assert!(
+            msgs.is_empty(),
+            "tapbacks from unauthorized senders must be ignored"
+        );
     }
 }
