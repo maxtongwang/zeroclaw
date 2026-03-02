@@ -547,7 +547,45 @@ Notes:
 allowed_contacts = ["*"]
 ```
 
-### 4.18 ACP
+### 4.20 BlueBubbles (iMessage via BlueBubbles server)
+
+[BlueBubbles](https://bluebubbles.app) is a self-hosted macOS server that exposes iMessage via REST API and webhook push.
+
+```toml
+[channels_config.bluebubbles]
+server_url = "http://192.168.1.100:1234"  # or ngrok URL
+password   = "your-bb-password"
+
+# Optional sender allowlist (phone numbers or Apple IDs). Default: allow all.
+allowed_senders = ["+15551234567", "user@example.com"]
+# Sender handles to silently ignore (e.g. suppress echoed outbound messages).
+ignore_senders  = []
+# Shared secret for inbound webhook auth (Authorization: Bearer <secret>).
+webhook_secret  = "optional-secret"
+
+# DM access policy: "open" | "allowlist" | "disabled". Default: "open".
+dm_policy = "open"
+# Group access policy: "open" | "allowlist" | "disabled". Default: "open".
+group_policy = "open"
+# Allowed group chat GUIDs when group_policy = "allowlist". Use ["*"] for all.
+group_allow_from = ["iMessage;+;chat-abc123"]
+# Send a read receipt to BB after each processed message. Default: true.
+send_read_receipts = true
+```
+
+Policy behaviour:
+
+| `dm_policy` | `allowed_senders` | Result                      |
+| ----------- | ----------------- | --------------------------- |
+| `open`      | empty             | all DMs allowed             |
+| `open`      | non-empty         | only listed senders allowed |
+| `allowlist` | empty             | all DMs denied              |
+| `allowlist` | non-empty         | only listed senders allowed |
+| `disabled`  | any               | all DMs silently dropped    |
+
+Group policy works the same way using `group_allow_from` (chat GUIDs) instead of `allowed_senders`.
+
+### 4.21 ACP
 
 ACP (Agent Client Protocol) enables ZeroClaw to act as a client for OpenCode ACP server,
 allowing remote control of OpenCode behavior through JSON-RPC 2.0 communication over stdio.

@@ -563,7 +563,17 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
                 bb.allowed_senders.clone(),
                 bb.ignore_senders.clone(),
             )
-            .map(|ch| Arc::new(ch.with_transcription(config.transcription.clone())))
+            .map(|ch| {
+                Arc::new(
+                    ch.with_policies(
+                        bb.dm_policy,
+                        bb.group_policy,
+                        bb.group_allow_from.clone(),
+                        bb.send_read_receipts,
+                    )
+                    .with_transcription(config.transcription.clone()),
+                )
+            })
         })
         .transpose()
         .map_err(|e| {
@@ -2384,6 +2394,8 @@ async fn handle_bluebubbles_webhook(
                         .await
                     {
                         tracing::error!("Failed to send BlueBubbles reply: {e}");
+                    } else {
+                        bb.mark_read(&msg.reply_target).await;
                     }
                 }
                 Err(e) => {
