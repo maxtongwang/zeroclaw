@@ -487,11 +487,15 @@ pub async fn handle_auth_revoke(
 
 async fn revoke_google_token(access_token: &str) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
-    client
+    let resp = client
         .post("https://oauth2.googleapis.com/revoke")
         .query(&[("token", access_token)])
         .send()
         .await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        tracing::warn!("Google token revocation returned non-success status: {status}");
+    }
     Ok(())
 }
 
@@ -563,8 +567,15 @@ pub async fn get_google_token(
     // Refresh 60 seconds before expiry
     let needs_refresh = token.expires_at.map(|exp| exp - now < 60).unwrap_or(false);
 
-    if needs_refresh && token.refresh_token.is_some() {
-        refresh_google_token(oauth_dir, client_id, client_secret).await
+    if needs_refresh {
+        if token.refresh_token.is_some() {
+            refresh_google_token(oauth_dir, client_id, client_secret).await
+        } else {
+            // Token is expired and no refresh_token is available.  Returning an
+            // expired token would cause all downstream API calls to fail with 401;
+            // return an explicit error so callers can surface a re-auth prompt.
+            anyhow::bail!("Google token is expired and no refresh_token is stored. Reconnect at /auth/google")
+        }
     } else {
         Ok(token.access_token)
     }
