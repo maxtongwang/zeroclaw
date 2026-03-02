@@ -190,7 +190,7 @@ impl BlueBubblesChannel {
     }
 
     /// Configure DM and group policies.
-    pub fn with_policies(
+    pub(crate) fn with_policies(
         mut self,
         dm_policy: BlueBubblesDmPolicy,
         group_policy: BlueBubblesGroupPolicy,

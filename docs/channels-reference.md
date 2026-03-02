@@ -585,7 +585,7 @@ Policy behaviour:
 
 Group policy works the same way using `group_allow_from` (chat GUIDs) instead of `allowed_senders`.
 
-### 4.18 ACP
+### 4.21 ACP
 
 ACP (Agent Client Protocol) enables ZeroClaw to act as a client for OpenCode ACP server,
 allowing remote control of OpenCode behavior through JSON-RPC 2.0 communication over stdio.
