@@ -228,6 +228,10 @@ impl BlueBubblesChannel {
     ///
     /// Returns a single-element vec (the original text) when chunking is disabled
     /// or the text is within the limit.
+    ///
+    /// `Newline` mode ignores `text_chunk_limit` — it is self-sufficient without
+    /// a character limit.  `Length` mode requires a non-zero limit; a zero limit
+    /// is rejected at config-load time in the gateway.
     fn chunk_content<'a>(&self, text: &'a str) -> Vec<&'a str> {
         match (self.chunk_mode, self.text_chunk_limit) {
             (Some(BlueBubblesChunkMode::Newline), _) => {
@@ -1316,8 +1320,8 @@ impl Channel for BlueBubblesChannel {
     /// Authentication is via `?password=` query param (not a Bearer header).
     ///
     /// When `text_chunk_limit` / `chunk_mode` are configured, the content is split
-    /// into multiple chunks and each is sent as a sequential API call. The
-    /// `[EFFECT:name]` tag and attributed body are applied per chunk.
+    /// into multiple chunks and each is sent as a sequential API call. The attributed
+    /// body is rendered per chunk; `[EFFECT:name]` is applied only to the first chunk.
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
         let url = self.api_url("/api/v1/message/text");
 
@@ -1327,7 +1331,7 @@ impl Channel for BlueBubblesChannel {
         // Split into chunks (returns single-element vec when chunking is disabled)
         let chunks = self.chunk_content(&content_no_effect);
 
-        for chunk in chunks {
+        for (idx, chunk) in chunks.into_iter().enumerate() {
             let attributed = markdown_to_attributed_body(chunk);
 
             // Plain-text fallback: concatenate all segment strings (markers stripped)
@@ -1344,11 +1348,14 @@ impl Channel for BlueBubblesChannel {
                 "attributedBody": attributed,
             });
 
-            // Append effectId if present (only on first chunk for multi-chunk sends)
-            if let Some(ref eid) = effect_id {
-                body.as_object_mut()
-                    .expect("serde_json::json!({}) always produces an object")
-                    .insert("effectId".into(), serde_json::Value::String(eid.clone()));
+            // Apply effectId only to the first chunk — playing a screen/bubble effect
+            // on every fragment would fire the animation multiple times in rapid succession.
+            if idx == 0 {
+                if let Some(ref eid) = effect_id {
+                    body.as_object_mut()
+                        .expect("serde_json::json!({}) always produces an object")
+                        .insert("effectId".into(), serde_json::Value::String(eid.clone()));
+                }
             }
 
             let resp = self
@@ -2528,5 +2535,81 @@ mod tests {
             msgs.is_empty(),
             "tapbacks from unauthorized senders must be ignored"
         );
+    }
+
+    // ---- chunk_content tests ------------------------------------------------
+
+    fn ch_with_chunking(
+        limit: Option<usize>,
+        mode: Option<BlueBubblesChunkMode>,
+    ) -> BlueBubblesChannel {
+        BlueBubblesChannel::new("http://localhost".into(), "pw".into(), vec![], vec![])
+            .with_chunking(limit, mode)
+    }
+
+    #[test]
+    fn chunk_content_no_op_when_both_none() {
+        let ch = ch_with_chunking(None, None);
+        assert_eq!(ch.chunk_content("hello world"), vec!["hello world"]);
+    }
+
+    #[test]
+    fn chunk_content_no_op_when_mode_none() {
+        let ch = ch_with_chunking(Some(5), None);
+        assert_eq!(ch.chunk_content("hello world"), vec!["hello world"]);
+    }
+
+    #[test]
+    fn chunk_content_newline_splits_on_newline() {
+        let ch = ch_with_chunking(None, Some(BlueBubblesChunkMode::Newline));
+        assert_eq!(
+            ch.chunk_content("line1\nline2\nline3"),
+            vec!["line1", "line2", "line3"]
+        );
+    }
+
+    #[test]
+    fn chunk_content_newline_skips_empty_lines() {
+        let ch = ch_with_chunking(None, Some(BlueBubblesChunkMode::Newline));
+        assert_eq!(ch.chunk_content("a\n\nb\n\nc"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn chunk_content_newline_works_without_limit() {
+        // Newline mode is self-sufficient even when text_chunk_limit is None
+        let ch = ch_with_chunking(None, Some(BlueBubblesChunkMode::Newline));
+        assert_eq!(ch.chunk_content("x\ny"), vec!["x", "y"]);
+    }
+
+    #[test]
+    fn chunk_content_length_no_split_when_within_limit() {
+        let ch = ch_with_chunking(Some(20), Some(BlueBubblesChunkMode::Length));
+        assert_eq!(ch.chunk_content("hello world"), vec!["hello world"]);
+    }
+
+    #[test]
+    fn chunk_content_length_splits_at_word_boundary() {
+        let ch = ch_with_chunking(Some(5), Some(BlueBubblesChunkMode::Length));
+        // "hello world" → "hello" (5), "world" (5)
+        let chunks = ch.chunk_content("hello world");
+        assert_eq!(chunks, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn chunk_content_length_hard_splits_word_longer_than_limit() {
+        // No interior whitespace → hard split at limit
+        let ch = ch_with_chunking(Some(3), Some(BlueBubblesChunkMode::Length));
+        let chunks = ch.chunk_content("abcdef");
+        // must produce non-empty chunks covering all 6 chars
+        let joined: String = chunks.iter().copied().collect();
+        assert_eq!(joined, "abcdef");
+        assert!(chunks.iter().all(|c| !c.is_empty()));
+    }
+
+    #[test]
+    fn chunk_content_length_with_zero_falls_through_to_noop() {
+        // limit=0 is guarded in gateway; the channel itself falls to the no-op arm
+        let ch = ch_with_chunking(Some(0), Some(BlueBubblesChunkMode::Length));
+        assert_eq!(ch.chunk_content("hello world"), vec!["hello world"]);
     }
 }

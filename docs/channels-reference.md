@@ -571,6 +571,13 @@ group_policy = "open"
 group_allow_from = ["iMessage;+;chat-abc123"]
 # Send a read receipt to BB after each processed message. Default: true.
 send_read_receipts = true
+
+# --- Text chunking (optional) ---
+# Maximum Unicode characters per outbound message. Omit to disable chunking.
+# text_chunk_limit = 4000
+# Split strategy: "length" (word-boundary split) | "newline" (split on \n).
+# "newline" is self-sufficient without text_chunk_limit.
+# chunk_mode = "length"
 ```
 
 Policy behaviour:
