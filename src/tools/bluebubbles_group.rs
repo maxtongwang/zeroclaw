@@ -268,7 +268,7 @@ impl Tool for BlueBubblesGroupTool {
             "set_group_icon" => {
                 const MAX_ICON_B64_LEN: usize = 5 * 1024 * 1024; // 5 MiB base64 input
                 let icon_b64 = match args.get("icon_base64").and_then(|v| v.as_str()) {
-                    Some(b) if !b.is_empty() => b.to_string(),
+                    Some(b) if !b.trim().is_empty() => b.trim().to_string(),
                     _ => {
                         return Ok(ToolResult {
                             success: false,
