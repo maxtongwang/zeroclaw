@@ -234,9 +234,13 @@ async fn transcribe_with_python_whisper(file_path: &str) -> anyhow::Result<Strin
         .and_then(|s| s.to_str())
         .unwrap_or("audio");
     let txt_path = tmp_dir.join(format!("{stem}.txt"));
-    let txt = tokio::fs::read_to_string(&txt_path)
-        .await
-        .context("Failed to read whisper output")?;
+    let txt = match tokio::fs::read_to_string(&txt_path).await {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+            return Err(anyhow::anyhow!("Failed to read whisper output: {e}"));
+        }
+    };
     let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
 
     let text = txt.trim().to_string();

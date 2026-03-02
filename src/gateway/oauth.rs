@@ -668,10 +668,11 @@ fn success_page(title: &str, message: &str) -> String {
 }
 
 fn error_page(title: &str, detail: &str) -> String {
+    let title_escaped = html_escape(title);
     let detail_escaped = html_escape(detail);
     format!(
-        r#"<!DOCTYPE html><html><head><title>Error: {title}</title></head><body>
-<h2>❌ {title}</h2><pre>{detail_escaped}</pre>
+        r#"<!DOCTYPE html><html><head><title>Error: {title_escaped}</title></head><body>
+<h2>❌ {title_escaped}</h2><pre>{detail_escaped}</pre>
 </body></html>"#
     )
 }
