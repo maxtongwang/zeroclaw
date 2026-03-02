@@ -46,7 +46,7 @@ impl Tool for BlueBubblesSendAttachmentTool {
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            "required": ["chat_guid", "filename", "data_base64", "mime_type"],
+            "required": ["chat_guid", "filename", "data_base64"],
             "properties": {
                 "chat_guid": {
                     "type": "string",
@@ -62,7 +62,7 @@ impl Tool for BlueBubblesSendAttachmentTool {
                 },
                 "mime_type": {
                     "type": "string",
-                    "description": "MIME type (e.g. `image/jpeg`, `audio/mp4`)."
+                    "description": "MIME type (e.g. `image/jpeg`, `audio/mp4`). Defaults to `application/octet-stream`."
                 },
                 "caption": {
                     "type": "string",
@@ -98,8 +98,20 @@ impl Tool for BlueBubblesSendAttachmentTool {
                 })
             }
         };
+        const MAX_ATTACHMENT_B64_LEN: usize = 50 * 1024 * 1024; // 50 MiB base64 input
         let data_b64 = match args.get("data_base64").and_then(|v| v.as_str()) {
-            Some(b) if !b.is_empty() => b,
+            Some(b) if !b.is_empty() => {
+                if b.len() > MAX_ATTACHMENT_B64_LEN {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "data_base64 exceeds maximum allowed size ({MAX_ATTACHMENT_B64_LEN} bytes)"
+                        )),
+                    });
+                }
+                b
+            }
             _ => {
                 return Ok(ToolResult {
                     success: false,
@@ -139,20 +151,25 @@ impl Tool for BlueBubblesSendAttachmentTool {
         let url = self.api_url("/api/v1/message/attachment");
 
         // Build multipart form fields required by BB Private API.
+        let attachment_part = match reqwest::multipart::Part::bytes(file_bytes)
+            .file_name(filename.clone())
+            .mime_str(&mime_type)
+        {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("invalid mime_type \"{mime_type}\": {e}")),
+                })
+            }
+        };
         let mut form = reqwest::multipart::Form::new()
             .text("chatGuid", chat_guid.clone())
             .text("tempGuid", temp_guid)
             .text("name", filename.clone())
             .text("method", "private-api")
-            .part(
-                "attachment",
-                reqwest::multipart::Part::bytes(file_bytes)
-                    .file_name(filename.clone())
-                    .mime_str(&mime_type)
-                    .unwrap_or_else(|_| {
-                        reqwest::multipart::Part::bytes(vec![]).file_name(filename.clone())
-                    }),
-            );
+            .part("attachment", attachment_part);
 
         if !caption.is_empty() {
             form = form.text("message", caption);
