@@ -7628,6 +7628,22 @@ impl Config {
             acp.validate()?;
         }
 
+        // BlueBubbles policy validation
+        if let Some(bb) = &self.channels_config.bluebubbles {
+            if bb.dm_policy == BlueBubblesDmPolicy::Allowlist && bb.allowed_senders.is_empty() {
+                anyhow::bail!(
+                    "channels_config.bluebubbles.dm_policy = \"allowlist\" requires at least one entry in allowed_senders"
+                );
+            }
+            if bb.group_policy == BlueBubblesGroupPolicy::Allowlist
+                && bb.group_allow_from.is_empty()
+            {
+                anyhow::bail!(
+                    "channels_config.bluebubbles.group_policy = \"allowlist\" requires at least one entry in group_allow_from"
+                );
+            }
+        }
+
         // Gateway
         if self.gateway.host.trim().is_empty() {
             anyhow::bail!("gateway.host must not be empty");
@@ -14298,5 +14314,51 @@ reserve_percent = 15
         config
             .validate()
             .expect("matching route_down hint route should validate");
+    }
+
+    #[test]
+    fn validation_rejects_bluebubbles_dm_allowlist_with_empty_senders() {
+        let mut config = Config::default();
+        config.channels_config.bluebubbles = Some(BlueBubblesConfig {
+            server_url: "http://localhost:1234".to_string(),
+            password: String::new(),
+            allowed_senders: vec![],
+            webhook_secret: None,
+            ignore_senders: vec![],
+            dm_policy: BlueBubblesDmPolicy::Allowlist,
+            group_policy: BlueBubblesGroupPolicy::Open,
+            group_allow_from: vec![],
+            send_read_receipts: true,
+        });
+        let err = config
+            .validate()
+            .expect_err("allowlist dm_policy with empty allowed_senders should fail validation");
+        assert!(
+            err.to_string().contains("dm_policy"),
+            "error should mention dm_policy"
+        );
+    }
+
+    #[test]
+    fn validation_rejects_bluebubbles_group_allowlist_with_empty_list() {
+        let mut config = Config::default();
+        config.channels_config.bluebubbles = Some(BlueBubblesConfig {
+            server_url: "http://localhost:1234".to_string(),
+            password: String::new(),
+            allowed_senders: vec![],
+            webhook_secret: None,
+            ignore_senders: vec![],
+            dm_policy: BlueBubblesDmPolicy::Open,
+            group_policy: BlueBubblesGroupPolicy::Allowlist,
+            group_allow_from: vec![],
+            send_read_receipts: true,
+        });
+        let err = config.validate().expect_err(
+            "allowlist group_policy with empty group_allow_from should fail validation",
+        );
+        assert!(
+            err.to_string().contains("group_policy"),
+            "error should mention group_policy"
+        );
     }
 }
