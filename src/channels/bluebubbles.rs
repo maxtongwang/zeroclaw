@@ -1037,30 +1037,33 @@ fn emoji_to_bb_tapback(emoji: &str) -> Option<&'static str> {
     }
 }
 
-/// Flush the current text buffer as one `attributedBody` segment.
-/// Clears `buf` via `std::mem::take` — no separate `clear()` needed.
-fn flush_attributed_segment(
-    buf: &mut String,
+/// Inline text formatting state threaded through `markdown_to_attributed_body`.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Default)]
+struct TextStyle {
     bold: bool,
     italic: bool,
     strike: bool,
     underline: bool,
-    out: &mut Vec<serde_json::Value>,
-) {
+}
+
+/// Flush the current text buffer as one `attributedBody` segment.
+/// Clears `buf` via `std::mem::take` — no separate `clear()` needed.
+fn flush_attributed_segment(buf: &mut String, style: TextStyle, out: &mut Vec<serde_json::Value>) {
     if buf.is_empty() {
         return;
     }
     let mut attrs = serde_json::Map::new();
-    if bold {
+    if style.bold {
         attrs.insert("bold".into(), serde_json::Value::Bool(true));
     }
-    if italic {
+    if style.italic {
         attrs.insert("italic".into(), serde_json::Value::Bool(true));
     }
-    if strike {
+    if style.strike {
         attrs.insert("strikethrough".into(), serde_json::Value::Bool(true));
     }
-    if underline {
+    if style.underline {
         attrs.insert("underline".into(), serde_json::Value::Bool(true));
     }
     let mut seg = serde_json::Map::new();
@@ -1110,10 +1113,19 @@ fn markdown_to_attributed_body(text: &str) -> Vec<serde_json::Value> {
         // Newline: flush header-bold segment, reset header state
         if c == '\n' {
             if header_bold {
-                flush_attributed_segment(&mut buf, true, italic, strike, underline, &mut segments);
+                flush_attributed_segment(
+                    &mut buf,
+                    TextStyle {
+                        bold: true,
+                        italic,
+                        strike,
+                        underline,
+                    },
+                    &mut segments,
+                );
                 header_bold = false;
                 buf.push('\n');
-                flush_attributed_segment(&mut buf, false, false, false, false, &mut segments);
+                flush_attributed_segment(&mut buf, TextStyle::default(), &mut segments);
             } else {
                 buf.push('\n');
             }
@@ -1125,7 +1137,7 @@ fn markdown_to_attributed_body(text: &str) -> Vec<serde_json::Value> {
         // Inside a code block: only watch for closing ```
         if in_code_block {
             if c == '`' && next == Some('`') && next2 == Some('`') {
-                flush_attributed_segment(&mut buf, false, false, false, false, &mut segments);
+                flush_attributed_segment(&mut buf, TextStyle::default(), &mut segments);
                 in_code_block = false;
                 i += 3;
                 while i < len && chars[i] != '\n' {
@@ -1148,10 +1160,12 @@ fn markdown_to_attributed_body(text: &str) -> Vec<serde_json::Value> {
             if j < len && chars[j] == ' ' {
                 flush_attributed_segment(
                     &mut buf,
-                    bold || code,
-                    italic,
-                    strike,
-                    underline,
+                    TextStyle {
+                        bold: bold || code,
+                        italic,
+                        strike,
+                        underline,
+                    },
                     &mut segments,
                 );
                 header_bold = true;
@@ -1166,7 +1180,16 @@ fn markdown_to_attributed_body(text: &str) -> Vec<serde_json::Value> {
 
         // Triple backtick: opening code fence
         if c == '`' && next == Some('`') && next2 == Some('`') {
-            flush_attributed_segment(&mut buf, eff_bold, italic, strike, underline, &mut segments);
+            flush_attributed_segment(
+                &mut buf,
+                TextStyle {
+                    bold: eff_bold,
+                    italic,
+                    strike,
+                    underline,
+                },
+                &mut segments,
+            );
             in_code_block = true;
             i += 3;
             // Skip language hint on the same line as opening fence
@@ -1182,7 +1205,16 @@ fn markdown_to_attributed_body(text: &str) -> Vec<serde_json::Value> {
 
         // Single backtick: inline code → bold
         if c == '`' {
-            flush_attributed_segment(&mut buf, eff_bold, italic, strike, underline, &mut segments);
+            flush_attributed_segment(
+                &mut buf,
+                TextStyle {
+                    bold: eff_bold,
+                    italic,
+                    strike,
+                    underline,
+                },
+                &mut segments,
+            );
             code = !code;
             i += 1;
             continue;
@@ -1190,7 +1222,16 @@ fn markdown_to_attributed_body(text: &str) -> Vec<serde_json::Value> {
 
         // **bold**
         if c == '*' && next == Some('*') {
-            flush_attributed_segment(&mut buf, eff_bold, italic, strike, underline, &mut segments);
+            flush_attributed_segment(
+                &mut buf,
+                TextStyle {
+                    bold: eff_bold,
+                    italic,
+                    strike,
+                    underline,
+                },
+                &mut segments,
+            );
             bold = !bold;
             i += 2;
             continue;
@@ -1198,7 +1239,16 @@ fn markdown_to_attributed_body(text: &str) -> Vec<serde_json::Value> {
 
         // ~~strikethrough~~
         if c == '~' && next == Some('~') {
-            flush_attributed_segment(&mut buf, eff_bold, italic, strike, underline, &mut segments);
+            flush_attributed_segment(
+                &mut buf,
+                TextStyle {
+                    bold: eff_bold,
+                    italic,
+                    strike,
+                    underline,
+                },
+                &mut segments,
+            );
             strike = !strike;
             i += 2;
             continue;
@@ -1206,7 +1256,16 @@ fn markdown_to_attributed_body(text: &str) -> Vec<serde_json::Value> {
 
         // __underline__
         if c == '_' && next == Some('_') {
-            flush_attributed_segment(&mut buf, eff_bold, italic, strike, underline, &mut segments);
+            flush_attributed_segment(
+                &mut buf,
+                TextStyle {
+                    bold: eff_bold,
+                    italic,
+                    strike,
+                    underline,
+                },
+                &mut segments,
+            );
             underline = !underline;
             i += 2;
             continue;
@@ -1214,7 +1273,16 @@ fn markdown_to_attributed_body(text: &str) -> Vec<serde_json::Value> {
 
         // *italic*
         if c == '*' {
-            flush_attributed_segment(&mut buf, eff_bold, italic, strike, underline, &mut segments);
+            flush_attributed_segment(
+                &mut buf,
+                TextStyle {
+                    bold: eff_bold,
+                    italic,
+                    strike,
+                    underline,
+                },
+                &mut segments,
+            );
             italic = !italic;
             i += 1;
             continue;
@@ -1226,10 +1294,12 @@ fn markdown_to_attributed_body(text: &str) -> Vec<serde_json::Value> {
 
     flush_attributed_segment(
         &mut buf,
-        bold || code || header_bold,
-        italic,
-        strike,
-        underline,
+        TextStyle {
+            bold: bold || code || header_bold,
+            italic,
+            strike,
+            underline,
+        },
         &mut segments,
     );
 

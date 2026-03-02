@@ -2306,6 +2306,7 @@ async fn handle_github_webhook(
 }
 
 /// POST /bluebubbles — incoming BlueBubbles iMessage webhook
+#[allow(clippy::large_futures)]
 async fn handle_bluebubbles_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
