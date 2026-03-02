@@ -9379,6 +9379,10 @@ mod tests {
             allowed_senders: vec!["*".to_string()],
             webhook_secret: Some("hook-secret".to_string()),
             ignore_senders: vec![],
+            dm_policy: BlueBubblesDmPolicy::default(),
+            group_policy: BlueBubblesGroupPolicy::default(),
+            group_allow_from: vec![],
+            send_read_receipts: true,
         };
 
         let debug_output = format!("{cfg:?}");
