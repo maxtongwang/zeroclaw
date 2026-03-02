@@ -5120,18 +5120,29 @@ pub struct BlueBubblesConfig {
 impl std::fmt::Debug for BlueBubblesConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let redacted_server_url = redact_url_userinfo_for_debug(&self.server_url);
+        // allowed_senders, ignore_senders, and group_allow_from can contain user
+        // phone numbers / chat identifiers — emit only a count to avoid leaking PII.
         f.debug_struct("BlueBubblesConfig")
             .field("server_url", &redacted_server_url)
             .field("password", &"[REDACTED]")
-            .field("allowed_senders", &self.allowed_senders)
+            .field(
+                "allowed_senders",
+                &format!("[{} items]", self.allowed_senders.len()),
+            )
             .field(
                 "webhook_secret",
                 &self.webhook_secret.as_ref().map(|_| "[REDACTED]"),
             )
-            .field("ignore_senders", &self.ignore_senders)
+            .field(
+                "ignore_senders",
+                &format!("[{} items]", self.ignore_senders.len()),
+            )
             .field("dm_policy", &self.dm_policy)
             .field("group_policy", &self.group_policy)
-            .field("group_allow_from", &self.group_allow_from)
+            .field(
+                "group_allow_from",
+                &format!("[{} items]", self.group_allow_from.len()),
+            )
             .field("send_read_receipts", &self.send_read_receipts)
             .finish()
     }
