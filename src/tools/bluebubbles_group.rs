@@ -126,16 +126,26 @@ impl Tool for BlueBubblesGroupTool {
                     }
                 };
                 let url = self.api_url(&format!("/api/v1/chat/{encoded_guid}"));
-                let resp = self
+                let resp = match self
                     .client
                     .put(&url)
                     .query(&[("password", &self.password)])
                     .json(&serde_json::json!({ "displayName": name }))
                     .send()
                     .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("BB rename_group request failed: {}", e.without_url())
-                    })?;
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!(
+                                "BB rename_group request failed: {}",
+                                e.without_url()
+                            )),
+                        })
+                    }
+                };
                 if resp.status().is_success() {
                     Ok(ToolResult {
                         success: true,
@@ -166,16 +176,26 @@ impl Tool for BlueBubblesGroupTool {
                     }
                 };
                 let url = self.api_url(&format!("/api/v1/chat/{encoded_guid}/participants/add"));
-                let resp = self
+                let resp = match self
                     .client
                     .post(&url)
                     .query(&[("password", &self.password)])
                     .json(&serde_json::json!({ "address": address }))
                     .send()
                     .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("BB add_participant request failed: {}", e.without_url())
-                    })?;
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!(
+                                "BB add_participant request failed: {}",
+                                e.without_url()
+                            )),
+                        })
+                    }
+                };
                 if resp.status().is_success() {
                     Ok(ToolResult {
                         success: true,
@@ -206,16 +226,26 @@ impl Tool for BlueBubblesGroupTool {
                     }
                 };
                 let url = self.api_url(&format!("/api/v1/chat/{encoded_guid}/participants/remove"));
-                let resp = self
+                let resp = match self
                     .client
                     .post(&url)
                     .query(&[("password", &self.password)])
                     .json(&serde_json::json!({ "address": address }))
                     .send()
                     .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("BB remove_participant request failed: {}", e.without_url())
-                    })?;
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!(
+                                "BB remove_participant request failed: {}",
+                                e.without_url()
+                            )),
+                        })
+                    }
+                };
                 if resp.status().is_success() {
                     Ok(ToolResult {
                         success: true,
@@ -238,15 +268,25 @@ impl Tool for BlueBubblesGroupTool {
 
             "leave_group" => {
                 let url = self.api_url(&format!("/api/v1/chat/{encoded_guid}/leave"));
-                let resp = self
+                let resp = match self
                     .client
                     .post(&url)
                     .query(&[("password", &self.password)])
                     .send()
                     .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("BB leave_group request failed: {}", e.without_url())
-                    })?;
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!(
+                                "BB leave_group request failed: {}",
+                                e.without_url()
+                            )),
+                        })
+                    }
+                };
                 if resp.status().is_success() {
                     Ok(ToolResult {
                         success: true,
@@ -312,16 +352,26 @@ impl Tool for BlueBubblesGroupTool {
                     }
                 };
                 let form = reqwest::multipart::Form::new().part("icon", icon_part);
-                let resp = self
+                let resp = match self
                     .client
                     .post(&url)
                     .query(&[("password", &self.password)])
                     .multipart(form)
                     .send()
                     .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("BB set_group_icon request failed: {}", e.without_url())
-                    })?;
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!(
+                                "BB set_group_icon request failed: {}",
+                                e.without_url()
+                            )),
+                        })
+                    }
+                };
                 if resp.status().is_success() {
                     Ok(ToolResult {
                         success: true,
