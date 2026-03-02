@@ -2327,61 +2327,68 @@ async fn handle_bluebubbles_webhook(
         );
     };
 
-    let messages = bluebubbles
-        .parse_webhook_payload_with_transcription(&payload)
-        .await;
+    // Acknowledge the request immediately and process asynchronously.
+    //
+    // Transcription (especially the Python whisper fallback) can take 30-90 s,
+    // which exceeds the global gateway timeout.  Returning 202 before the
+    // slow work starts keeps the HTTP lifecycle within the timeout budget while
+    // the background task handles transcription, LLM inference, and reply.
+    let bb = Arc::clone(bluebubbles);
+    let state_bg = state.clone();
+    tokio::spawn(async move {
+        let messages = bb.parse_webhook_payload_with_transcription(&payload).await;
 
-    if messages.is_empty() {
-        return (StatusCode::OK, Json(serde_json::json!({"status": "ok"})));
-    }
+        for msg in &messages {
+            tracing::info!(
+                "BlueBubbles iMessage from {}: {}",
+                msg.sender,
+                truncate_with_ellipsis(&msg.content, 50)
+            );
 
-    for msg in &messages {
-        tracing::info!(
-            "BlueBubbles iMessage from {}: {}",
-            msg.sender,
-            truncate_with_ellipsis(&msg.content, 50)
-        );
-
-        if state.auto_save {
-            let key = bluebubbles_memory_key(msg);
-            let _ = state
-                .mem
-                .store(&key, &msg.content, MemoryCategory::Conversation, None)
-                .await;
-        }
-
-        let _ = bluebubbles.start_typing(&msg.reply_target).await;
-        let leak_guard_cfg = gateway_outbound_leak_guard_snapshot(&state);
-
-        match run_gateway_chat_with_tools(&state, &msg.content, None).await {
-            Ok(response) => {
-                let _ = bluebubbles.stop_typing(&msg.reply_target).await;
-                let safe_response = sanitize_gateway_response(
-                    &response,
-                    state.tools_registry_exec.as_ref(),
-                    &leak_guard_cfg,
-                );
-                if let Err(e) = bluebubbles
-                    .send(&SendMessage::new(safe_response, &msg.reply_target))
-                    .await
-                {
-                    tracing::error!("Failed to send BlueBubbles reply: {e}");
-                }
-            }
-            Err(e) => {
-                let _ = bluebubbles.stop_typing(&msg.reply_target).await;
-                tracing::error!("LLM error for BlueBubbles message: {e:#}");
-                let _ = bluebubbles
-                    .send(&SendMessage::new(
-                        "Sorry, I couldn't process your message right now.",
-                        &msg.reply_target,
-                    ))
+            if state_bg.auto_save {
+                let key = bluebubbles_memory_key(msg);
+                let _ = state_bg
+                    .mem
+                    .store(&key, &msg.content, MemoryCategory::Conversation, None)
                     .await;
             }
-        }
-    }
 
-    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+            let _ = bb.start_typing(&msg.reply_target).await;
+            let leak_guard_cfg = gateway_outbound_leak_guard_snapshot(&state_bg);
+
+            match run_gateway_chat_with_tools(&state_bg, &msg.content, None).await {
+                Ok(response) => {
+                    let _ = bb.stop_typing(&msg.reply_target).await;
+                    let safe_response = sanitize_gateway_response(
+                        &response,
+                        state_bg.tools_registry_exec.as_ref(),
+                        &leak_guard_cfg,
+                    );
+                    if let Err(e) = bb
+                        .send(&SendMessage::new(safe_response, &msg.reply_target))
+                        .await
+                    {
+                        tracing::error!("Failed to send BlueBubbles reply: {e}");
+                    }
+                }
+                Err(e) => {
+                    let _ = bb.stop_typing(&msg.reply_target).await;
+                    tracing::error!("LLM error for BlueBubbles message: {e:#}");
+                    let _ = bb
+                        .send(&SendMessage::new(
+                            "Sorry, I couldn't process your message right now.",
+                            &msg.reply_target,
+                        ))
+                        .await;
+                }
+            }
+        }
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({"status": "accepted"})),
+    )
 }
 
 /// GET /wati — WATI webhook verification (echoes hub.challenge)
