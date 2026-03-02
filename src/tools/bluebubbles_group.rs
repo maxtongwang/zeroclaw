@@ -78,7 +78,7 @@ impl Tool for BlueBubblesGroupTool {
                 },
                 "icon_base64": {
                     "type": "string",
-                    "description": "Base64-encoded image bytes for set_group_icon."
+                    "description": "Base64-encoded JPEG image bytes for set_group_icon (max 5 MB)."
                 }
             },
             "additionalProperties": false
@@ -86,15 +86,21 @@ impl Tool for BlueBubblesGroupTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let action = args
-            .get("action")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let action = match args.get("action").and_then(|v| v.as_str()) {
+            Some(a) if !a.trim().is_empty() => a.trim().to_string(),
+            _ => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("action is required".into()),
+                })
+            }
+        };
         let chat_guid = args
             .get("chat_guid")
             .and_then(|v| v.as_str())
             .unwrap_or("")
+            .trim()
             .to_string();
 
         if chat_guid.is_empty() {
@@ -110,7 +116,7 @@ impl Tool for BlueBubblesGroupTool {
         match action.as_str() {
             "rename_group" => {
                 let name = match args.get("display_name").and_then(|v| v.as_str()) {
-                    Some(n) if !n.is_empty() => n.to_string(),
+                    Some(n) if !n.trim().is_empty() => n.trim().to_string(),
                     _ => {
                         return Ok(ToolResult {
                             success: false,
@@ -150,7 +156,7 @@ impl Tool for BlueBubblesGroupTool {
 
             "add_participant" => {
                 let address = match args.get("address").and_then(|v| v.as_str()) {
-                    Some(a) if !a.is_empty() => a.to_string(),
+                    Some(a) if !a.trim().is_empty() => a.trim().to_string(),
                     _ => {
                         return Ok(ToolResult {
                             success: false,
@@ -190,7 +196,7 @@ impl Tool for BlueBubblesGroupTool {
 
             "remove_participant" => {
                 let address = match args.get("address").and_then(|v| v.as_str()) {
-                    Some(a) if !a.is_empty() => a.to_string(),
+                    Some(a) if !a.trim().is_empty() => a.trim().to_string(),
                     _ => {
                         return Ok(ToolResult {
                             success: false,
@@ -260,6 +266,7 @@ impl Tool for BlueBubblesGroupTool {
             }
 
             "set_group_icon" => {
+                const MAX_ICON_B64_LEN: usize = 5 * 1024 * 1024; // 5 MiB base64 input
                 let icon_b64 = match args.get("icon_base64").and_then(|v| v.as_str()) {
                     Some(b) if !b.is_empty() => b.to_string(),
                     _ => {
@@ -270,6 +277,13 @@ impl Tool for BlueBubblesGroupTool {
                         })
                     }
                 };
+                if icon_b64.len() > MAX_ICON_B64_LEN {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some("icon_base64 exceeds 5 MiB limit".into()),
+                    });
+                }
                 let icon_bytes = match base64::Engine::decode(
                     &base64::engine::general_purpose::STANDARD,
                     &icon_b64,
@@ -284,10 +298,20 @@ impl Tool for BlueBubblesGroupTool {
                     }
                 };
                 let url = self.api_url(&format!("/api/v1/chat/{encoded_guid}/icon"));
-                let form = reqwest::multipart::Form::new().part(
-                    "icon",
-                    reqwest::multipart::Part::bytes(icon_bytes).file_name("icon.jpg"),
-                );
+                let icon_part = match reqwest::multipart::Part::bytes(icon_bytes)
+                    .file_name("icon.jpg")
+                    .mime_str("image/jpeg")
+                {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!("failed to build icon multipart: {e}")),
+                        })
+                    }
+                };
+                let form = reqwest::multipart::Form::new().part("icon", icon_part);
                 let resp = self
                     .client
                     .post(&url)
