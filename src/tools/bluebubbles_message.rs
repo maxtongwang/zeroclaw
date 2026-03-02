@@ -50,7 +50,7 @@ impl Tool for BlueBubblesMessageTool {
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            "required": ["action", "message_id", "chat_guid"],
+            "required": ["action", "message_id"],
             "properties": {
                 "action": {
                     "type": "string",
@@ -63,7 +63,7 @@ impl Tool for BlueBubblesMessageTool {
                 },
                 "chat_guid": {
                     "type": "string",
-                    "description": "BB chat GUID (e.g. `iMessage;-;+15551234567`)."
+                    "description": "BB chat GUID (e.g. `iMessage;-;+15551234567`). Required only for reply."
                 },
                 "text": {
                     "type": "string",
@@ -75,13 +75,18 @@ impl Tool for BlueBubblesMessageTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let action = args
-            .get("action")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let action = match args.get("action").and_then(|v| v.as_str()) {
+            Some(a) if !a.trim().is_empty() => a.trim().to_string(),
+            _ => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("action is required".into()),
+                })
+            }
+        };
         let message_id = match args.get("message_id").and_then(|v| v.as_str()) {
-            Some(id) if !id.is_empty() => id.to_string(),
+            Some(id) if !id.trim().is_empty() => id.trim().to_string(),
             _ => {
                 return Ok(ToolResult {
                     success: false,
@@ -90,19 +95,19 @@ impl Tool for BlueBubblesMessageTool {
                 })
             }
         };
-        let chat_guid = match args.get("chat_guid").and_then(|v| v.as_str()) {
-            Some(g) if !g.is_empty() => g.to_string(),
-            _ => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some("chat_guid is required".into()),
-                })
-            }
-        };
 
         match action.as_str() {
             "reply" => {
+                let chat_guid = match args.get("chat_guid").and_then(|v| v.as_str()) {
+                    Some(g) if !g.trim().is_empty() => g.trim().to_string(),
+                    _ => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some("chat_guid is required for reply".into()),
+                        })
+                    }
+                };
                 let text = match args.get("text").and_then(|v| v.as_str()) {
                     Some(t) if !t.is_empty() => t.to_string(),
                     _ => {
