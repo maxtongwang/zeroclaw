@@ -5056,6 +5056,32 @@ impl ChannelConfig for GitHubConfig {
     }
 }
 
+/// Access policy for BlueBubbles direct (1:1) messages.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlueBubblesDmPolicy {
+    /// Allow all DMs (legacy behaviour; `allowed_senders` still filters when non-empty).
+    #[default]
+    Open,
+    /// Only allow senders in `allowed_senders`.
+    Allowlist,
+    /// Silently drop all DMs.
+    Disabled,
+}
+
+/// Access policy for BlueBubbles group chats.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlueBubblesGroupPolicy {
+    /// Allow messages from all group chats.
+    #[default]
+    Open,
+    /// Only allow groups whose GUID is in `group_allow_from`.
+    Allowlist,
+    /// Silently drop all group messages.
+    Disabled,
+}
+
 /// BlueBubbles iMessage bridge channel configuration.
 ///
 /// BlueBubbles is a self-hosted macOS server that exposes iMessage via a
@@ -5076,6 +5102,19 @@ pub struct BlueBubblesConfig {
     /// Sender handles to silently ignore (e.g. suppress echoed outbound messages).
     #[serde(default)]
     pub ignore_senders: Vec<String>,
+    /// Access policy for direct (1:1) messages. Default: `open`.
+    #[serde(default)]
+    pub dm_policy: BlueBubblesDmPolicy,
+    /// Access policy for group chats. Default: `open`.
+    #[serde(default)]
+    pub group_policy: BlueBubblesGroupPolicy,
+    /// Chat GUIDs allowed when `group_policy = "allowlist"`.
+    #[serde(default)]
+    pub group_allow_from: Vec<String>,
+    /// When `true`, send a read receipt to BlueBubbles after processing each
+    /// inbound message. Default: `true`.
+    #[serde(default = "default_true")]
+    pub send_read_receipts: bool,
 }
 
 impl std::fmt::Debug for BlueBubblesConfig {
@@ -5089,6 +5128,11 @@ impl std::fmt::Debug for BlueBubblesConfig {
                 "webhook_secret",
                 &self.webhook_secret.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("ignore_senders", &self.ignore_senders)
+            .field("dm_policy", &self.dm_policy)
+            .field("group_policy", &self.group_policy)
+            .field("group_allow_from", &self.group_allow_from)
+            .field("send_read_receipts", &self.send_read_receipts)
             .finish()
     }
 }
