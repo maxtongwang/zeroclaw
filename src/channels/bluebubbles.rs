@@ -1,5 +1,7 @@
 use super::traits::{Channel, ChannelMessage, SendMessage};
-use crate::config::schema::{BlueBubblesChunkMode, BlueBubblesDmPolicy, BlueBubblesGroupPolicy};
+use crate::config::schema::{
+    BlueBubblesChunkMode, BlueBubblesDmPolicy, BlueBubblesGroupConfig, BlueBubblesGroupPolicy,
+};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
@@ -165,6 +167,12 @@ pub struct BlueBubblesChannel {
     text_chunk_limit: Option<usize>,
     /// Chunking strategy. `None` = no chunking.
     chunk_mode: Option<BlueBubblesChunkMode>,
+    /// Require mention keyword in group chats globally.
+    require_mention_in_groups: bool,
+    /// Keyword the bot must be mentioned by in group chats.
+    mention_keyword: Option<String>,
+    /// Per-group overrides: chat GUID → config. `None` require_mention inherits global.
+    group_configs: HashMap<String, BlueBubblesGroupConfig>,
 }
 
 impl BlueBubblesChannel {
@@ -192,6 +200,9 @@ impl BlueBubblesChannel {
             transcription: None,
             text_chunk_limit: None,
             chunk_mode: None,
+            require_mention_in_groups: false,
+            mention_keyword: None,
+            group_configs: HashMap::new(),
         }
     }
 
@@ -266,6 +277,89 @@ impl BlueBubblesChannel {
                 chunks
             }
             _ => vec![text],
+        }
+    }
+
+    /// Configure group mention gating.
+    ///
+    /// When `require_mention_in_groups` is `true`, group messages that do not
+    /// contain `mention_keyword` (case-insensitive) are silently dropped.
+    /// Per-group overrides in `group_configs` take precedence over the global flag.
+    ///
+    /// Emits a one-time warning at construction when gating is enabled but no
+    /// usable keyword can be resolved (no `mention_keyword` and no non-wildcard
+    /// `allowed_senders`).
+    pub(crate) fn with_mention_gating(
+        mut self,
+        require_mention_in_groups: bool,
+        mention_keyword: Option<String>,
+        group_configs: HashMap<String, BlueBubblesGroupConfig>,
+    ) -> Self {
+        if require_mention_in_groups {
+            // A blank mention_keyword ("" or "  ") is treated as absent — it would match
+            // every message after trim and silently disable gating, which is surprising.
+            let effective_keyword = mention_keyword
+                .as_deref()
+                .map(str::trim)
+                .filter(|k| !k.is_empty());
+            let has_keyword = effective_keyword.is_some()
+                || self.allowed_senders.iter().any(|s| s.as_str() != "*");
+            if !has_keyword {
+                tracing::warn!(
+                    "BlueBubbles: require_mention_in_groups is true but no \
+                     mention_keyword or non-wildcard allowed_senders is configured — \
+                     all group messages will be silently dropped until this is fixed"
+                );
+            }
+        }
+        // Pre-lowercase the (trimmed) keyword to avoid allocation on every inbound message.
+        // An empty or whitespace-only mention_keyword is discarded (treated as absent).
+        self.mention_keyword = mention_keyword
+            .map(|kw| kw.trim().to_ascii_lowercase())
+            .filter(|kw| !kw.is_empty());
+        self.require_mention_in_groups = require_mention_in_groups;
+        self.group_configs = group_configs;
+        self
+    }
+
+    /// Returns `true` when `text` must be dropped because a mention is required
+    /// in this group chat but the keyword is absent from the message.
+    ///
+    /// Always returns `false` for DM chats.
+    fn mention_required_but_missing(&self, chat_guid: &str, text: &str) -> bool {
+        if !Self::is_group_chat(chat_guid) {
+            return false;
+        }
+
+        // Per-group override takes precedence
+        let require = if let Some(cfg) = self.group_configs.get(chat_guid) {
+            match cfg.require_mention {
+                Some(v) => v,
+                None => self.require_mention_in_groups,
+            }
+        } else {
+            self.require_mention_in_groups
+        };
+
+        if !require {
+            return false;
+        }
+
+        // Resolve effective keyword: pre-lowercased explicit keyword >
+        // first non-wildcard allowed_sender > none (always block).
+        // `"*"` is a sentinel meaning "allow all senders" and must not be
+        // used as a literal mention keyword.
+        let keyword = self.mention_keyword.as_deref().or_else(|| {
+            self.allowed_senders
+                .iter()
+                .find(|s| s.as_str() != "*")
+                .map(String::as_str)
+        });
+
+        match keyword {
+            Some(kw) => !text.to_ascii_lowercase().contains(kw),
+            // No keyword can be resolved — always block (warning was already emitted at startup).
+            None => true,
         }
     }
 
@@ -806,6 +900,15 @@ impl BlueBubblesChannel {
             return self.parse_webhook_payload(payload);
         }
 
+        // Apply mention gate before starting the typing indicator.  Voice notes
+        // can never contain a keyword in their raw bytes; check using an empty
+        // string as the text so the gate acts solely on the group-policy flag /
+        // per-group override.  If the gate fires here the message will be
+        // silently dropped and no typing side-effect will reach the user.
+        if self.mention_required_but_missing(&chat_guid_for_policy, "") {
+            return self.parse_webhook_payload(payload);
+        }
+
         // Start typing indicator before whisper runs — transcription can take >30 s
         // and without this the user sees no feedback during the slow CPU phase.
         if let Some(chat_guid) = Self::extract_chat_guid(data) {
@@ -913,6 +1016,12 @@ impl BlueBubblesChannel {
         if !allowed {
             return vec![];
         }
+
+        // Tapbacks intentionally bypass mention gating: reactions are contextual
+        // actions on existing messages and carry no user-typed text.  A mention
+        // keyword can never appear inside a tapback, so silently dropping them
+        // would break the agent's awareness of reactions in gated groups.
+        // DM/group policy (above) remains enforced.
 
         // If the reacted-to message was from the bot, include a quoted excerpt.
         // `lookup_reply_context` returns None for unknown or empty GUIDs, so no
@@ -1041,6 +1150,15 @@ impl BlueBubblesChannel {
             tracing::debug!("BlueBubbles: skipping empty message from {sender}");
             return messages;
         };
+
+        // Drop group messages that lack the required mention keyword
+        if self.mention_required_but_missing(&reply_target, &content) {
+            tracing::debug!(
+                "BlueBubbles: group message from {sender} in {reply_target} dropped \
+                 (mention keyword not found)"
+            );
+            return messages;
+        }
 
         // If the user is replying to a bot message, inject the original body
         // as context — matches OpenClaw's reply-context resolution.
@@ -2624,5 +2742,134 @@ mod tests {
             ch.chunk_content("hello world this is a longer message"),
             vec!["hello world this is a longer message"]
         );
+    }
+
+    // ---- mention_required_but_missing tests --------------------------------
+
+    fn ch_with_mention(
+        require_global: bool,
+        keyword: Option<&str>,
+        allowed: Vec<&str>,
+    ) -> BlueBubblesChannel {
+        BlueBubblesChannel::new(
+            "http://localhost".into(),
+            "pw".into(),
+            allowed.into_iter().map(String::from).collect(),
+            vec![],
+        )
+        .with_mention_gating(require_global, keyword.map(String::from), HashMap::new())
+    }
+
+    #[test]
+    fn mention_gate_dm_guid_always_passes() {
+        let ch = ch_with_mention(true, Some("bot"), vec![]);
+        assert!(!ch.mention_required_but_missing("iMessage;-;+15551234567", "hello"));
+    }
+
+    #[test]
+    fn mention_gate_global_false_allows_all_groups() {
+        let ch = ch_with_mention(false, Some("bot"), vec![]);
+        assert!(!ch.mention_required_but_missing("iMessage;+;chat1", "hello no keyword"));
+    }
+
+    #[test]
+    fn mention_gate_keyword_present_allows() {
+        let ch = ch_with_mention(true, Some("bot"), vec![]);
+        assert!(!ch.mention_required_but_missing("iMessage;+;chat1", "hey bot how are you"));
+    }
+
+    #[test]
+    fn mention_gate_keyword_absent_drops() {
+        let ch = ch_with_mention(true, Some("bot"), vec![]);
+        assert!(ch.mention_required_but_missing("iMessage;+;chat1", "hello there"));
+    }
+
+    #[test]
+    fn mention_gate_keyword_case_insensitive() {
+        let ch = ch_with_mention(true, Some("Bot"), vec![]);
+        assert!(!ch.mention_required_but_missing("iMessage;+;chat1", "hey BOT do this"));
+    }
+
+    #[test]
+    fn mention_gate_fallback_to_allowed_senders_non_wildcard() {
+        let ch = ch_with_mention(true, None, vec!["+15551234567"]);
+        assert!(!ch.mention_required_but_missing("iMessage;+;chat1", "yo +15551234567 help"));
+    }
+
+    #[test]
+    fn mention_gate_wildcard_in_allowed_senders_is_skipped() {
+        // "*" must not be used as a literal keyword
+        let ch = ch_with_mention(true, None, vec!["*"]);
+        // no usable keyword → always block
+        assert!(ch.mention_required_but_missing("iMessage;+;chat1", "anything even *"));
+    }
+
+    #[test]
+    fn mention_gate_no_keyword_always_blocks() {
+        let ch = ch_with_mention(true, None, vec![]);
+        assert!(ch.mention_required_but_missing("iMessage;+;chat1", "hello world"));
+    }
+
+    #[test]
+    fn mention_gate_per_group_false_overrides_global_true() {
+        use crate::config::schema::BlueBubblesGroupConfig;
+        let mut group_cfgs = HashMap::new();
+        group_cfgs.insert(
+            "iMessage;+;chat1".to_string(),
+            BlueBubblesGroupConfig {
+                require_mention: Some(false),
+            },
+        );
+        let ch = BlueBubblesChannel::new("http://localhost".into(), "pw".into(), vec![], vec![])
+            .with_mention_gating(true, Some("bot".into()), group_cfgs);
+        // Per-group override disables requirement
+        assert!(!ch.mention_required_but_missing("iMessage;+;chat1", "hello no keyword"));
+    }
+
+    #[test]
+    fn mention_gate_per_group_true_overrides_global_false() {
+        use crate::config::schema::BlueBubblesGroupConfig;
+        let mut group_cfgs = HashMap::new();
+        group_cfgs.insert(
+            "iMessage;+;chat1".to_string(),
+            BlueBubblesGroupConfig {
+                require_mention: Some(true),
+            },
+        );
+        let ch = BlueBubblesChannel::new("http://localhost".into(), "pw".into(), vec![], vec![])
+            .with_mention_gating(false, Some("bot".into()), group_cfgs);
+        // Per-group override enables requirement
+        assert!(ch.mention_required_but_missing("iMessage;+;chat1", "hello no keyword"));
+    }
+
+    #[test]
+    fn mention_gate_per_group_none_inherits_global() {
+        use crate::config::schema::BlueBubblesGroupConfig;
+        let mut group_cfgs = HashMap::new();
+        group_cfgs.insert(
+            "iMessage;+;chat1".to_string(),
+            BlueBubblesGroupConfig {
+                require_mention: None,
+            },
+        );
+        let ch = BlueBubblesChannel::new("http://localhost".into(), "pw".into(), vec![], vec![])
+            .with_mention_gating(true, Some("bot".into()), group_cfgs);
+        // None inherits global=true → keyword required
+        assert!(ch.mention_required_but_missing("iMessage;+;chat1", "hello no keyword"));
+    }
+
+    #[test]
+    fn mention_gate_empty_string_keyword_treated_as_absent() {
+        // A blank mention_keyword must not silently disable gating by matching every
+        // message.  It should be discarded and treated as "no keyword configured".
+        let ch = ch_with_mention(true, Some(""), vec![]);
+        // No usable keyword → always block (same as None)
+        assert!(ch.mention_required_but_missing("iMessage;+;chat1", "hello world"));
+    }
+
+    #[test]
+    fn mention_gate_whitespace_only_keyword_treated_as_absent() {
+        let ch = ch_with_mention(true, Some("   "), vec![]);
+        assert!(ch.mention_required_but_missing("iMessage;+;chat1", "   hello"));
     }
 }
