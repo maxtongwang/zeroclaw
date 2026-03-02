@@ -146,7 +146,7 @@ pub struct BlueBubblesChannel {
     dm_policy: BlueBubblesDmPolicy,
     /// Access policy for group chats.
     group_policy: BlueBubblesGroupPolicy,
-    /// Chat GUIDs allowed when `group_policy = Allowlist`.
+    /// Chat GUIDs allowed when `group_policy = Allowlist`. Use `["*"]` to allow all groups.
     group_allow_from: Vec<String>,
     /// When true, POST a read receipt to BB after processing each inbound message.
     send_read_receipts: bool,
@@ -294,23 +294,28 @@ impl BlueBubblesChannel {
     /// No-op when `send_read_receipts = false`. Errors are logged but not
     /// propagated — a failed read-receipt must never prevent the reply from
     /// sending.
-    pub async fn mark_read(&self, chat_guid: &str) {
+    pub(crate) async fn mark_read(&self, chat_guid: &str) {
         if !self.send_read_receipts {
             return;
         }
         let encoded = urlencoding::encode(chat_guid).into_owned();
         let url = self.api_url(&format!("/api/v1/chat/{encoded}/read"));
-        if let Err(e) = self
+        match self
             .client
             .post(&url)
             .query(&[("password", &self.password)])
             .send()
             .await
         {
-            tracing::warn!(
+            Err(e) => tracing::warn!(
                 "BlueBubbles mark_read failed for {chat_guid}: {}",
                 e.without_url()
-            );
+            ),
+            Ok(resp) if !resp.status().is_success() => tracing::warn!(
+                "BlueBubbles mark_read got {} for {chat_guid}",
+                resp.status()
+            ),
+            Ok(_) => {}
         }
     }
 
@@ -963,10 +968,7 @@ impl BlueBubblesChannel {
                 return messages;
             }
         } else if !self.is_dm_allowed(&sender) {
-            tracing::warn!(
-                "BlueBubbles: DM from {sender} denied by dm_policy. \
-                Set dm_policy=\"open\" or add sender to allowed_senders."
-            );
+            tracing::debug!("BlueBubbles: DM from {sender} denied by dm_policy");
             return messages;
         }
 
@@ -1506,6 +1508,139 @@ mod tests {
             BlueBubblesChannel::new("http://localhost:1234".into(), "pw".into(), vec![], vec![]);
         assert!(ch.is_sender_allowed("+1_234_567_890"));
         assert!(ch.is_sender_allowed("anyone@example.com"));
+    }
+
+    // --- Policy gate tests ---
+
+    #[test]
+    fn bluebubbles_is_group_chat() {
+        assert!(BlueBubblesChannel::is_group_chat("iMessage;+;chat123"));
+        assert!(!BlueBubblesChannel::is_group_chat(
+            "iMessage;-;+15551234567"
+        ));
+        assert!(!BlueBubblesChannel::is_group_chat(""));
+    }
+
+    #[test]
+    fn bluebubbles_dm_policy_open_empty_allows_all() {
+        // Open + empty allowed_senders = allow everyone (legacy behaviour)
+        let ch = BlueBubblesChannel::new("http://localhost".into(), "pw".into(), vec![], vec![]);
+        assert!(ch.is_dm_allowed("+1_555_000_0001"));
+    }
+
+    #[test]
+    fn bluebubbles_dm_policy_open_with_list_filters() {
+        let ch = BlueBubblesChannel::new(
+            "http://localhost".into(),
+            "pw".into(),
+            vec!["+1_555_000_0001".into()],
+            vec![],
+        );
+        assert!(ch.is_dm_allowed("+1_555_000_0001"));
+        assert!(!ch.is_dm_allowed("+1_555_000_0099"));
+    }
+
+    #[test]
+    fn bluebubbles_dm_policy_allowlist_empty_denies_all() {
+        let ch = BlueBubblesChannel::new("http://localhost".into(), "pw".into(), vec![], vec![])
+            .with_policies(
+                BlueBubblesDmPolicy::Allowlist,
+                BlueBubblesGroupPolicy::Open,
+                vec![],
+                true,
+            );
+        assert!(!ch.is_dm_allowed("+1_555_000_0001"));
+    }
+
+    #[test]
+    fn bluebubbles_dm_policy_allowlist_matches() {
+        let ch = BlueBubblesChannel::new(
+            "http://localhost".into(),
+            "pw".into(),
+            vec!["+1_555_000_0001".into()],
+            vec![],
+        )
+        .with_policies(
+            BlueBubblesDmPolicy::Allowlist,
+            BlueBubblesGroupPolicy::Open,
+            vec![],
+            true,
+        );
+        assert!(ch.is_dm_allowed("+1_555_000_0001"));
+        assert!(!ch.is_dm_allowed("+1_555_000_0099"));
+    }
+
+    #[test]
+    fn bluebubbles_dm_policy_disabled_denies_all() {
+        let ch = BlueBubblesChannel::new(
+            "http://localhost".into(),
+            "pw".into(),
+            vec!["*".into()],
+            vec![],
+        )
+        .with_policies(
+            BlueBubblesDmPolicy::Disabled,
+            BlueBubblesGroupPolicy::Open,
+            vec![],
+            true,
+        );
+        assert!(!ch.is_dm_allowed("+1_555_000_0001"));
+    }
+
+    #[test]
+    fn bluebubbles_group_policy_open_allows_any() {
+        let ch = BlueBubblesChannel::new("http://localhost".into(), "pw".into(), vec![], vec![]);
+        assert!(ch.is_group_allowed("iMessage;+;chat1"));
+        assert!(ch.is_group_allowed("iMessage;+;chat2"));
+    }
+
+    #[test]
+    fn bluebubbles_group_policy_disabled_denies_all() {
+        let ch = BlueBubblesChannel::new("http://localhost".into(), "pw".into(), vec![], vec![])
+            .with_policies(
+                BlueBubblesDmPolicy::Open,
+                BlueBubblesGroupPolicy::Disabled,
+                vec![],
+                true,
+            );
+        assert!(!ch.is_group_allowed("iMessage;+;chat1"));
+    }
+
+    #[test]
+    fn bluebubbles_group_policy_allowlist_filters() {
+        let ch = BlueBubblesChannel::new("http://localhost".into(), "pw".into(), vec![], vec![])
+            .with_policies(
+                BlueBubblesDmPolicy::Open,
+                BlueBubblesGroupPolicy::Allowlist,
+                vec!["iMessage;+;chat_allowed".into()],
+                true,
+            );
+        assert!(ch.is_group_allowed("iMessage;+;chat_allowed"));
+        assert!(!ch.is_group_allowed("iMessage;+;chat_other"));
+    }
+
+    #[test]
+    fn bluebubbles_group_policy_allowlist_empty_denies_all() {
+        let ch = BlueBubblesChannel::new("http://localhost".into(), "pw".into(), vec![], vec![])
+            .with_policies(
+                BlueBubblesDmPolicy::Open,
+                BlueBubblesGroupPolicy::Allowlist,
+                vec![],
+                true,
+            );
+        assert!(!ch.is_group_allowed("iMessage;+;any_group"));
+    }
+
+    #[test]
+    fn bluebubbles_group_policy_allowlist_wildcard() {
+        let ch = BlueBubblesChannel::new("http://localhost".into(), "pw".into(), vec![], vec![])
+            .with_policies(
+                BlueBubblesDmPolicy::Open,
+                BlueBubblesGroupPolicy::Allowlist,
+                vec!["*".into()],
+                true,
+            );
+        assert!(ch.is_group_allowed("iMessage;+;any_group"));
     }
 
     #[test]
