@@ -2304,6 +2304,7 @@ async fn handle_runtime_command_if_needed(
     /// - Grant session and persistent runtime grants
     /// - Persist to config
     /// - Clear exclusions
+    ///
     /// Returns the approval success message.
     async fn handle_confirm_tool_approval_side_effects(
         ctx: &ChannelRuntimeContext,
@@ -5844,7 +5845,6 @@ mod tests {
     use crate::memory::{Memory, MemoryCategory, SqliteMemory};
     use crate::observability::NoopObserver;
     use crate::providers::{ChatMessage, Provider};
-    use crate::security::AutonomyLevel;
     use crate::tools::{Tool, ToolResult};
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -7014,13 +7014,6 @@ BTC is currently around $65,000 based on latest tool output."#
         let mut channels_by_name = HashMap::new();
         channels_by_name.insert(channel.name().to_string(), channel);
 
-        let autonomy_cfg = crate::config::AutonomyConfig {
-            level: AutonomyLevel::Full,
-            auto_approve: vec!["mock_price".to_string()],
-            ..crate::config::AutonomyConfig::default()
-        };
-        let _approval_manager = Arc::new(ApprovalManager::from_config(&autonomy_cfg));
-
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
             channels_by_name: Arc::new(channels_by_name),
             provider: Arc::new(ToolCallingProvider),
@@ -7087,13 +7080,6 @@ BTC is currently around $65,000 based on latest tool output."#
 
         let mut channels_by_name = HashMap::new();
         channels_by_name.insert(channel.name().to_string(), channel);
-
-        let autonomy_cfg = crate::config::AutonomyConfig {
-            level: AutonomyLevel::Full,
-            auto_approve: vec!["mock_price".to_string()],
-            ..crate::config::AutonomyConfig::default()
-        };
-        let _approval_manager = Arc::new(ApprovalManager::from_config(&autonomy_cfg));
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
             channels_by_name: Arc::new(channels_by_name),
@@ -7176,13 +7162,6 @@ BTC is currently around $65,000 based on latest tool output."#
         let mut channels_by_name = HashMap::new();
         channels_by_name.insert(channel.name().to_string(), channel);
 
-        let autonomy_cfg = crate::config::AutonomyConfig {
-            level: AutonomyLevel::Full,
-            auto_approve: vec!["mock_price".to_string()],
-            ..crate::config::AutonomyConfig::default()
-        };
-        let _approval_manager = Arc::new(ApprovalManager::from_config(&autonomy_cfg));
-
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
             channels_by_name: Arc::new(channels_by_name),
             provider: Arc::new(ToolCallingProvider),
@@ -7262,13 +7241,6 @@ BTC is currently around $65,000 based on latest tool output."#
 
         let mut channels_by_name = HashMap::new();
         channels_by_name.insert(channel.name().to_string(), channel);
-
-        let autonomy_cfg = crate::config::AutonomyConfig {
-            level: AutonomyLevel::Full,
-            auto_approve: vec!["mock_price".to_string()],
-            ..crate::config::AutonomyConfig::default()
-        };
-        let _approval_manager = Arc::new(ApprovalManager::from_config(&autonomy_cfg));
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
             channels_by_name: Arc::new(channels_by_name),
@@ -7408,13 +7380,6 @@ BTC is currently around $65,000 based on latest tool output."#
 
         let mut channels_by_name = HashMap::new();
         channels_by_name.insert(channel.name().to_string(), channel);
-
-        let autonomy_cfg = crate::config::AutonomyConfig {
-            level: AutonomyLevel::Full,
-            auto_approve: vec!["mock_price".to_string()],
-            ..crate::config::AutonomyConfig::default()
-        };
-        let _approval_manager = Arc::new(ApprovalManager::from_config(&autonomy_cfg));
 
         let runtime_ctx = Arc::new(ChannelRuntimeContext {
             channels_by_name: Arc::new(channels_by_name),
