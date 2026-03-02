@@ -109,7 +109,7 @@ impl Tool for BlueBubblesMessageTool {
                     }
                 };
                 let text = match args.get("text").and_then(|v| v.as_str()) {
-                    Some(t) if !t.is_empty() => t.to_string(),
+                    Some(t) if !t.trim().is_empty() => t.trim().to_string(),
                     _ => {
                         return Ok(ToolResult {
                             success: false,
@@ -154,7 +154,7 @@ impl Tool for BlueBubblesMessageTool {
 
             "edit" => {
                 let text = match args.get("text").and_then(|v| v.as_str()) {
-                    Some(t) if !t.is_empty() => t.to_string(),
+                    Some(t) if !t.trim().is_empty() => t.trim().to_string(),
                     _ => {
                         return Ok(ToolResult {
                             success: false,
@@ -198,6 +198,7 @@ impl Tool for BlueBubblesMessageTool {
             "unsend" => {
                 let encoded_id = urlencoding::encode(&message_id).into_owned();
                 let url = self.api_url(&format!("/api/v1/message/{encoded_id}/unsend"));
+                // partIndex 0 targets the text body; multi-part unsend is not yet exposed.
                 let body = serde_json::json!({ "partIndex": 0 });
                 let resp = self
                     .client
