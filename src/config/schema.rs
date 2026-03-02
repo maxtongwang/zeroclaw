@@ -14317,7 +14317,7 @@ reserve_percent = 15
     }
 
     #[test]
-    fn validation_rejects_bluebubbles_dm_allowlist_with_empty_senders() {
+    async fn validation_rejects_bluebubbles_dm_allowlist_with_empty_senders() {
         let mut config = Config::default();
         config.channels_config.bluebubbles = Some(BlueBubblesConfig {
             server_url: "http://localhost:1234".to_string(),
@@ -14340,7 +14340,7 @@ reserve_percent = 15
     }
 
     #[test]
-    fn validation_rejects_bluebubbles_group_allowlist_with_empty_list() {
+    async fn validation_rejects_bluebubbles_group_allowlist_with_empty_list() {
         let mut config = Config::default();
         config.channels_config.bluebubbles = Some(BlueBubblesConfig {
             server_url: "http://localhost:1234".to_string(),
