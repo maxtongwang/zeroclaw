@@ -306,7 +306,7 @@ impl Tool for BlueBubblesGroupTool {
             }
 
             "set_group_icon" => {
-                const MAX_ICON_B64_LEN: usize = 5 * 1024 * 1024; // 5 MiB base64 input
+                const MAX_ICON_BYTES: usize = 5 * 1024 * 1024; // 5 MiB decoded
                 let icon_b64 = match args.get("icon_base64").and_then(|v| v.as_str()) {
                     Some(b) if !b.trim().is_empty() => b.trim().to_string(),
                     _ => {
@@ -317,13 +317,6 @@ impl Tool for BlueBubblesGroupTool {
                         })
                     }
                 };
-                if icon_b64.len() > MAX_ICON_B64_LEN {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some("icon_base64 exceeds 5 MiB limit".into()),
-                    });
-                }
                 let icon_bytes = match base64::Engine::decode(
                     &base64::engine::general_purpose::STANDARD,
                     &icon_b64,
@@ -337,6 +330,13 @@ impl Tool for BlueBubblesGroupTool {
                         })
                     }
                 };
+                if icon_bytes.len() > MAX_ICON_BYTES {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some("icon exceeds 5 MiB limit".into()),
+                    });
+                }
                 let url = self.api_url(&format!("/api/v1/chat/{encoded_guid}/icon"));
                 let icon_part = match reqwest::multipart::Part::bytes(icon_bytes)
                     .file_name("icon.jpg")
