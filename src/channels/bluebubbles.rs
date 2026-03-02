@@ -1,6 +1,6 @@
 use super::traits::{Channel, ChannelMessage, SendMessage};
-use async_trait::async_trait;
 use crate::config::schema::{BlueBubblesDmPolicy, BlueBubblesGroupPolicy};
+use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use uuid::Uuid;
@@ -291,10 +291,13 @@ impl BlueBubblesChannel {
 
     /// Mark a chat as read on the BB server (fire-and-forget).
     ///
-    /// POSTs to `/api/v1/chat/{guid}/read`. Only called when
-    /// `send_read_receipts = true`. Errors are logged but not propagated —
-    /// a failed read-receipt must never prevent the reply from sending.
+    /// No-op when `send_read_receipts = false`. Errors are logged but not
+    /// propagated — a failed read-receipt must never prevent the reply from
+    /// sending.
     pub async fn mark_read(&self, chat_guid: &str) {
+        if !self.send_read_receipts {
+            return;
+        }
         let encoded = urlencoding::encode(chat_guid).into_owned();
         let url = self.api_url(&format!("/api/v1/chat/{encoded}/read"));
         if let Err(e) = self
