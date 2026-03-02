@@ -20,6 +20,7 @@ pub mod apply_patch;
 pub mod auth_profile;
 pub mod bg_run;
 pub mod bluebubbles_group;
+pub mod bluebubbles_message;
 pub mod bluebubbles_send_attachment;
 pub mod browser;
 pub mod browser_open;
@@ -92,6 +93,7 @@ pub use bg_run::{
     format_bg_result_for_injection, BgJob, BgJobStatus, BgJobStore, BgRunTool, BgStatusTool,
 };
 pub use bluebubbles_group::BlueBubblesGroupTool;
+pub use bluebubbles_message::BlueBubblesMessageTool;
 pub use bluebubbles_send_attachment::BlueBubblesSendAttachmentTool;
 pub use browser::{BrowserTool, ComputerUseConfig};
 pub use browser_open::BrowserOpenTool;
@@ -644,12 +646,13 @@ pub fn all_tools_with_runtime(
                 Ok(tool) => tool_arcs.push(Arc::new(tool)),
                 Err(e) => tracing::error!("Failed to initialize BlueBubblesGroupTool: {e}"),
             }
-            match BlueBubblesSendAttachmentTool::new(security.clone(), server_url, password) {
+            match BlueBubblesSendAttachmentTool::new(security.clone(), server_url.clone(), password.clone()) {
                 Ok(tool) => tool_arcs.push(Arc::new(tool)),
                 Err(e) => {
                     tracing::error!("Failed to initialize BlueBubblesSendAttachmentTool: {e}")
                 }
             }
+            tool_arcs.push(Arc::new(BlueBubblesMessageTool::new(server_url, password)));
         }
     }
 
