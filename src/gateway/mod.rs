@@ -111,6 +111,13 @@ fn hash_webhook_secret(value: &str) -> String {
 /// How often the rate limiter sweeps stale IP entries from its map.
 const RATE_LIMITER_SWEEP_INTERVAL_SECS: u64 = 300; // 5 minutes
 
+/// Maximum number of concurrently-running BlueBubbles webhook background tasks
+/// (transcription + LLM inference + reply).  Bounded to prevent resource
+/// exhaustion under burst/retry conditions.  New webhooks that arrive while
+/// the pool is full are immediately rejected with 503.
+static BB_WORKER_SEMAPHORE: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(16)));
+
 #[derive(Debug)]
 struct SlidingWindowRateLimiter {
     limit_per_window: u32,
@@ -2337,11 +2344,25 @@ async fn handle_bluebubbles_webhook(
     //
     // Transcription (especially the Python whisper fallback) can take 30-90 s,
     // which exceeds the global gateway timeout.  Returning 202 before the
+    // Acquire a concurrency slot before spawning.  Reject immediately if the
+    // pool is exhausted rather than queuing unbounded work.
+    let permit = match Arc::clone(&*BB_WORKER_SEMAPHORE).try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            tracing::warn!("BlueBubbles worker pool exhausted — dropping webhook");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "worker pool exhausted, retry later"})),
+            );
+        }
+    };
+
     // slow work starts keeps the HTTP lifecycle within the timeout budget while
     // the background task handles transcription, LLM inference, and reply.
     let bb = Arc::clone(bluebubbles);
     let state_bg = state.clone();
     tokio::spawn(async move {
+        let _permit = permit; // released when this task completes
         let messages = bb.parse_webhook_payload_with_transcription(&payload).await;
 
         for msg in &messages {

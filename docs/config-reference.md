@@ -239,19 +239,19 @@ Runtime workflow (`web_access_config`):
 }
 ```
 
-2. Dry-run a target URL before access:
+1. Dry-run a target URL before access:
 
 ```json
 { "action": "check_url", "url": "https://docs.rs" }
 ```
 
-3. After human confirmation, persist approval for future runs:
+1. After human confirmation, persist approval for future runs:
 
 ```json
 { "action": "set", "add_approved_domains": ["docs.rs"] }
 ```
 
-4. Escalate to strict allowlist-only mode (recommended for production agents):
+1. Escalate to strict allowlist-only mode (recommended for production agents):
 
 ```json
 {
@@ -261,7 +261,7 @@ Runtime workflow (`web_access_config`):
 }
 ```
 
-5. Emergency deny of a domain across all URL tools:
+1. Emergency deny of a domain across all URL tools:
 
 ```json
 { "action": "set", "add_domain_blocklist": ["*.malware.test"] }
@@ -797,7 +797,7 @@ Runtime workflow (`web_search_config`):
 { "action": "get" }
 ```
 
-2. Set a primary provider with fallback chain:
+1. Set a primary provider with fallback chain:
 
 ```json
 {
@@ -807,7 +807,7 @@ Runtime workflow (`web_search_config`):
 }
 ```
 
-3. Tune provider-specific options:
+1. Tune provider-specific options:
 
 ```json
 { "action": "set", "exa_search_type": "neural", "exa_include_text": true }
@@ -817,7 +817,7 @@ Runtime workflow (`web_search_config`):
 { "action": "set", "jina_site_filters": ["docs.rs", "github.com"] }
 ```
 
-4. Add geo/language/recency filters for region-aware queries:
+1. Add geo/language/recency filters for region-aware queries:
 
 ```json
 {
