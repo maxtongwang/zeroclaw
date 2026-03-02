@@ -552,6 +552,14 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .map(Arc::from);
 
     // BlueBubbles channel (if configured)
+    if let Some(bb) = config.channels_config.bluebubbles.as_ref() {
+        if bb.text_chunk_limit == Some(0) {
+            anyhow::bail!(
+                "[channels.bluebubbles] text_chunk_limit must be > 0 (got 0); \
+                 remove the key or set it to a positive integer to enable chunking"
+            );
+        }
+    }
     let bluebubbles_channel: Option<Arc<BlueBubblesChannel>> =
         config.channels_config.bluebubbles.as_ref().map(|bb| {
             Arc::new(
@@ -567,6 +575,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
                     bb.group_allow_from.clone(),
                     bb.send_read_receipts,
                 )
+                .with_chunking(bb.text_chunk_limit, bb.chunk_mode)
                 .with_transcription(config.transcription.clone()),
             )
         });
