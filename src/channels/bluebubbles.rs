@@ -1,5 +1,6 @@
 use super::traits::{Channel, ChannelMessage, SendMessage};
 use async_trait::async_trait;
+use crate::config::schema::{BlueBubblesDmPolicy, BlueBubblesGroupPolicy};
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use uuid::Uuid;
@@ -141,6 +142,14 @@ pub struct BlueBubblesChannel {
     password: String,
     allowed_senders: Vec<String>,
     pub ignore_senders: Vec<String>,
+    /// Access policy for direct (1:1) messages.
+    dm_policy: BlueBubblesDmPolicy,
+    /// Access policy for group chats.
+    group_policy: BlueBubblesGroupPolicy,
+    /// Chat GUIDs allowed when `group_policy = Allowlist`.
+    group_allow_from: Vec<String>,
+    /// When true, POST a read receipt to BB after processing each inbound message.
+    send_read_receipts: bool,
     client: reqwest::Client,
     /// Cache of recent `fromMe` messages keyed by message GUID.
     /// Used to inject reply context when the user replies to a bot message.
@@ -166,6 +175,10 @@ impl BlueBubblesChannel {
             password,
             allowed_senders,
             ignore_senders,
+            dm_policy: BlueBubblesDmPolicy::Open,
+            group_policy: BlueBubblesGroupPolicy::Open,
+            group_allow_from: Vec::new(),
+            send_read_receipts: true,
             client: reqwest::ClientBuilder::new()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -174,6 +187,21 @@ impl BlueBubblesChannel {
             typing_handles: Mutex::new(HashMap::new()),
             transcription: None,
         }
+    }
+
+    /// Configure DM and group policies.
+    pub fn with_policies(
+        mut self,
+        dm_policy: BlueBubblesDmPolicy,
+        group_policy: BlueBubblesGroupPolicy,
+        group_allow_from: Vec<String>,
+        send_read_receipts: bool,
+    ) -> Self {
+        self.dm_policy = dm_policy;
+        self.group_policy = group_policy;
+        self.group_allow_from = group_allow_from;
+        self.send_read_receipts = send_read_receipts;
+        self
     }
 
     /// Configure voice transcription via Groq Whisper.
@@ -196,7 +224,59 @@ impl BlueBubblesChannel {
             .any(|s| s == "*" || s.eq_ignore_ascii_case(sender))
     }
 
-    /// Check if a sender address is allowed.
+    /// Return true if the chat GUID identifies a group chat.
+    ///
+    /// BB group GUIDs contain `;+;`; DM GUIDs contain `;-;`.
+    /// When the GUID is absent (empty string) we treat the message as a DM.
+    fn is_group_chat(chat_guid: &str) -> bool {
+        chat_guid.contains(";+;")
+    }
+
+    /// Check if a DM from `sender` is allowed under `dm_policy`.
+    ///
+    /// - `Disabled` → always deny.
+    /// - `Allowlist` → `allowed_senders` must be non-empty and match.
+    /// - `Open` → apply the legacy `allowed_senders` check (empty = allow all).
+    fn is_dm_allowed(&self, sender: &str) -> bool {
+        match self.dm_policy {
+            BlueBubblesDmPolicy::Disabled => false,
+            BlueBubblesDmPolicy::Allowlist => {
+                if self.allowed_senders.is_empty() {
+                    return false;
+                }
+                self.allowed_senders
+                    .iter()
+                    .any(|a| a == "*" || a.eq_ignore_ascii_case(sender))
+            }
+            BlueBubblesDmPolicy::Open => {
+                // Preserve legacy behaviour: empty list = allow all.
+                if self.allowed_senders.is_empty() {
+                    return true;
+                }
+                self.allowed_senders
+                    .iter()
+                    .any(|a| a == "*" || a.eq_ignore_ascii_case(sender))
+            }
+        }
+    }
+
+    /// Check if a group message from `chat_guid` is allowed under `group_policy`.
+    ///
+    /// - `Disabled` → always deny.
+    /// - `Allowlist` → `group_allow_from` must contain the chat GUID.
+    /// - `Open` → allow all groups.
+    fn is_group_allowed(&self, chat_guid: &str) -> bool {
+        match self.group_policy {
+            BlueBubblesGroupPolicy::Disabled => false,
+            BlueBubblesGroupPolicy::Allowlist => self
+                .group_allow_from
+                .iter()
+                .any(|g| g == "*" || g.eq_ignore_ascii_case(chat_guid)),
+            BlueBubblesGroupPolicy::Open => true,
+        }
+    }
+
+    /// Check if a sender address is allowed (legacy helper used by tapback path).
     ///
     /// Matches OpenClaw behaviour: empty list → allow all (no allowlist
     /// configured means "open"). Use `"*"` for explicit wildcard.
@@ -207,6 +287,28 @@ impl BlueBubblesChannel {
         self.allowed_senders
             .iter()
             .any(|a| a == "*" || a.eq_ignore_ascii_case(sender))
+    }
+
+    /// Mark a chat as read on the BB server (fire-and-forget).
+    ///
+    /// POSTs to `/api/v1/chat/{guid}/read`. Only called when
+    /// `send_read_receipts = true`. Errors are logged but not propagated —
+    /// a failed read-receipt must never prevent the reply from sending.
+    pub async fn mark_read(&self, chat_guid: &str) {
+        let encoded = urlencoding::encode(chat_guid).into_owned();
+        let url = self.api_url(&format!("/api/v1/chat/{encoded}/read"));
+        if let Err(e) = self
+            .client
+            .post(&url)
+            .query(&[("password", &self.password)])
+            .send()
+            .await
+        {
+            tracing::warn!(
+                "BlueBubbles mark_read failed for {chat_guid}: {}",
+                e.without_url()
+            );
+        }
     }
 
     /// Build a full API URL for the given endpoint path.
@@ -587,7 +689,9 @@ impl BlueBubblesChannel {
         &self,
         payload: &serde_json::Value,
     ) -> Vec<ChannelMessage> {
-        if self.transcription.is_none() {
+        // Local whisper needs no config — allow transcription whenever
+        // whisper-cli is installed, even if [transcription] is not configured.
+        if self.transcription.is_none() && !super::transcription::whisper_available() {
             return self.parse_webhook_payload(payload);
         }
 
@@ -617,7 +721,15 @@ impl BlueBubblesChannel {
         let Some(sender) = Self::extract_sender(data) else {
             return self.parse_webhook_payload(payload);
         };
-        if self.is_sender_ignored(&sender) || !self.is_sender_allowed(&sender) {
+        let chat_guid_for_policy = Self::extract_chat_guid(data)
+            .filter(|g| !g.is_empty())
+            .unwrap_or_default();
+        let allowed = if Self::is_group_chat(&chat_guid_for_policy) {
+            self.is_group_allowed(&chat_guid_for_policy)
+        } else {
+            self.is_dm_allowed(&sender)
+        };
+        if self.is_sender_ignored(&sender) || !allowed {
             return self.parse_webhook_payload(payload);
         }
 
@@ -714,13 +826,20 @@ impl BlueBubblesChannel {
         if self.is_sender_ignored(&sender) {
             return vec![];
         }
-        if !self.is_sender_allowed(&sender) {
-            return vec![];
-        }
 
         let reply_target = Self::extract_chat_guid(data)
             .filter(|g| !g.is_empty())
             .unwrap_or_else(|| sender.clone());
+
+        // Apply DM vs group policy to tapbacks.
+        let allowed = if Self::is_group_chat(&reply_target) {
+            self.is_group_allowed(&reply_target)
+        } else {
+            self.is_dm_allowed(&sender)
+        };
+        if !allowed {
+            return vec![];
+        }
 
         // If the reacted-to message was from the bot, include a quoted excerpt.
         // `lookup_reply_context` returns None for unknown or empty GUIDs, so no
@@ -826,20 +945,27 @@ impl BlueBubblesChannel {
             return messages;
         }
 
-        if !self.is_sender_allowed(&sender) {
-            tracing::warn!(
-                "BlueBubbles: ignoring message from unauthorized sender: {sender}. \
-                Add to channels.bluebubbles.allowed_senders in config.toml, \
-                or use \"*\" to allow all senders."
-            );
-            return messages;
-        }
-
         // Use chat GUID as reply_target — ensures replies go to the correct
         // conversation (important for group chats). Falls back to sender address.
         let reply_target = Self::extract_chat_guid(data)
             .filter(|g| !g.is_empty())
             .unwrap_or_else(|| sender.clone());
+
+        // Apply DM vs group policy gate.
+        if Self::is_group_chat(&reply_target) {
+            if !self.is_group_allowed(&reply_target) {
+                tracing::debug!(
+                    "BlueBubbles: group message from {reply_target} denied by group_policy"
+                );
+                return messages;
+            }
+        } else if !self.is_dm_allowed(&sender) {
+            tracing::warn!(
+                "BlueBubbles: DM from {sender} denied by dm_policy. \
+                Set dm_policy=\"open\" or add sender to allowed_senders."
+            );
+            return messages;
+        }
 
         let Some(mut content) = Self::extract_content(data) else {
             tracing::debug!("BlueBubbles: skipping empty message from {sender}");
