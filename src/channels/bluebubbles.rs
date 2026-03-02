@@ -490,7 +490,9 @@ impl BlueBubblesChannel {
             .query(&[("password", &self.password)])
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("BB attachment download request failed: {e}"))?;
+            .map_err(|e| {
+                anyhow::anyhow!("BB attachment download request failed: {}", e.without_url())
+            })?;
         if !resp.status().is_success() {
             anyhow::bail!(
                 "BlueBubbles attachment download failed ({}): GUID={}",
@@ -534,13 +536,8 @@ impl BlueBubblesChannel {
         // Local whisper handles CAF (iMessage voice memos) and any format
         // supported by ffmpeg — no pre-conversion step needed.
         if super::transcription::whisper_available() {
-            let tmp_path = std::env::temp_dir().join(format!(
-                "zc_bb_audio_{}.{ext}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            ));
+            let tmp_path =
+                std::env::temp_dir().join(format!("zc_bb_audio_{}.{ext}", uuid::Uuid::new_v4()));
             tokio::fs::write(&tmp_path, &bytes).await?;
             let result =
                 super::transcription::transcribe_audio_local(tmp_path.to_str().unwrap_or("")).await;
@@ -606,6 +603,23 @@ impl BlueBubblesChannel {
         let Some(att) = Self::extract_audio_attachment(data) else {
             return self.parse_webhook_payload(payload);
         };
+
+        // Gate typing on the same prechecks parse_webhook_payload uses, so
+        // fromMe / ignored / disallowed senders never trigger side-effects.
+        let is_from_me = data
+            .get("isFromMe")
+            .or_else(|| data.get("is_from_me"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if is_from_me {
+            return self.parse_webhook_payload(payload);
+        }
+        let Some(sender) = Self::extract_sender(data) else {
+            return self.parse_webhook_payload(payload);
+        };
+        if self.is_sender_ignored(&sender) || !self.is_sender_allowed(&sender) {
+            return self.parse_webhook_payload(payload);
+        }
 
         // Start typing indicator before whisper runs — transcription can take >30 s
         // and without this the user sees no feedback during the slow CPU phase.
@@ -1250,7 +1264,13 @@ impl Channel for BlueBubblesChannel {
             .query(&[("password", &self.password)])
             .json(&body)
             .send()
-            .await?;
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "BlueBubbles add_reaction request failed: {}",
+                    e.without_url()
+                )
+            })?;
         if resp.status().is_success() {
             return Ok(());
         }
@@ -1290,7 +1310,13 @@ impl Channel for BlueBubblesChannel {
             .query(&[("password", &self.password)])
             .json(&body)
             .send()
-            .await?;
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "BlueBubbles remove_reaction request failed: {}",
+                    e.without_url()
+                )
+            })?;
         if resp.status().is_success() {
             return Ok(());
         }

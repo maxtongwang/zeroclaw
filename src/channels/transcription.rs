@@ -69,29 +69,25 @@ async fn transcribe_with_whisper_cpp(
     let (input_path, caf_tmp): (PathBuf, Option<PathBuf>) = if ext.eq_ignore_ascii_case("wav") {
         (PathBuf::from(file_path), None)
     } else {
-        let tmp = std::env::temp_dir().join(format!(
-            "zc_wpp_{}.wav",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
+        let tmp = std::env::temp_dir().join(format!("zc_wpp_{}.wav", uuid::Uuid::new_v4()));
         let ffmpeg = resolve_ffmpeg_bin().context(
             "ffmpeg not found — install ffmpeg to enable CAF transcription with whisper-cli",
         )?;
-        let conv = Command::new(ffmpeg)
-            .args([
-                "-y",
-                "-i",
-                file_path,
-                "-ar",
-                "16000",
-                "-ac",
-                "1",
-                tmp.to_str().unwrap_or(""),
-            ])
-            .output()
+        let mut ffmpeg_cmd = Command::new(ffmpeg);
+        ffmpeg_cmd.args([
+            "-y",
+            "-i",
+            file_path,
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            tmp.to_str().unwrap_or(""),
+        ]);
+        ffmpeg_cmd.kill_on_drop(true);
+        let conv = tokio::time::timeout(std::time::Duration::from_secs(120), ffmpeg_cmd.output())
             .await
+            .map_err(|_| anyhow::anyhow!("ffmpeg CAF→WAV conversion timed out after 120s"))?
             .context("ffmpeg CAF→WAV conversion failed")?;
         if !conv.status.success() {
             let stderr = String::from_utf8_lossy(&conv.stderr);
@@ -100,11 +96,7 @@ async fn transcribe_with_whisper_cpp(
         (tmp.clone(), Some(tmp))
     };
 
-    let base = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let out_dir = std::env::temp_dir().join(format!("zc_wpp_{base}"));
+    let out_dir = std::env::temp_dir().join(format!("zc_wpp_{}", uuid::Uuid::new_v4()));
     tokio::fs::create_dir_all(&out_dir)
         .await
         .context("Failed to create whisper-cli output dir")?;
@@ -124,20 +116,22 @@ async fn transcribe_with_whisper_cpp(
         input_str
     );
 
-    let result = Command::new(bin)
-        .args([
-            "-m",
-            model,
-            "-otxt",
-            "-of",
-            out_base_str,
-            "-np", // no progress bar
-            "-nt", // no timestamps
-            input_str,
-        ])
-        .output()
+    let mut whisper_cmd = Command::new(bin);
+    whisper_cmd.args([
+        "-m",
+        model,
+        "-otxt",
+        "-of",
+        out_base_str,
+        "-np", // no progress bar
+        "-nt", // no timestamps
+        input_str,
+    ]);
+    whisper_cmd.kill_on_drop(true);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(120), whisper_cmd.output())
         .await
-        .context("whisper-cli error");
+        .map_err(|_| anyhow::anyhow!("whisper-cli timed out after 120s"))
+        .and_then(|r| r.context("whisper-cli error"));
 
     // Clean up temp WAV regardless of outcome.
     if let Some(ref tmp) = caf_tmp {
@@ -185,29 +179,27 @@ async fn transcribe_with_python_whisper(file_path: &str) -> anyhow::Result<Strin
     let whisper_bin = resolve_whisper_bin()
         .context("No whisper backend — install whisper-cpp (`brew install whisper-cpp`) or openai-whisper (`pip install openai-whisper`)")?;
 
-    let base = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let tmp_dir = std::env::temp_dir().join(format!("zc_whisper_{base}"));
+    let tmp_dir = std::env::temp_dir().join(format!("zc_whisper_{}", uuid::Uuid::new_v4()));
     tokio::fs::create_dir_all(&tmp_dir)
         .await
         .context("Failed to create whisper temp dir")?;
 
-    let output = Command::new(whisper_bin)
-        .args([
-            "--model",
-            "turbo",
-            "--output_format",
-            "txt",
-            "--output_dir",
-            tmp_dir.to_str().unwrap_or(""),
-            "--verbose",
-            "False",
-            file_path,
-        ])
-        .output()
+    let mut whisper_cmd = Command::new(whisper_bin);
+    whisper_cmd.args([
+        "--model",
+        "turbo",
+        "--output_format",
+        "txt",
+        "--output_dir",
+        tmp_dir.to_str().unwrap_or(""),
+        "--verbose",
+        "False",
+        file_path,
+    ]);
+    whisper_cmd.kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(120), whisper_cmd.output())
         .await
+        .map_err(|_| anyhow::anyhow!("whisper CLI timed out after 120s"))?
         .context("whisper CLI error")?;
 
     if !output.status.success() {
@@ -250,10 +242,16 @@ fn resolve_whisper_cpp() -> Option<(&'static str, &'static str)> {
             "/usr/local/bin/whisper-cli",
         ];
         const MODELS: &[&str] = &[
+            // Apple Silicon Homebrew
             "/opt/homebrew/share/whisper-cpp/ggml-base.bin",
             "/opt/homebrew/share/whisper-cpp/ggml-small.bin",
             "/opt/homebrew/share/whisper-cpp/ggml-tiny.bin",
             "/opt/homebrew/share/whisper-cpp/for-tests-ggml-tiny.bin",
+            // Intel Homebrew (prefix /usr/local/opt/whisper-cpp)
+            "/usr/local/opt/whisper-cpp/share/whisper-cpp/ggml-base.bin",
+            "/usr/local/opt/whisper-cpp/share/whisper-cpp/ggml-small.bin",
+            "/usr/local/opt/whisper-cpp/share/whisper-cpp/ggml-tiny.bin",
+            "/usr/local/opt/whisper-cpp/share/whisper-cpp/for-tests-ggml-tiny.bin",
         ];
         let bin = BINS
             .iter()
