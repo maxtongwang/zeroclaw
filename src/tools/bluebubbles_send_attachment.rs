@@ -22,7 +22,7 @@ impl BlueBubblesSendAttachmentTool {
             client: reqwest::ClientBuilder::new()
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
-                .expect("valid reqwest client config"),
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
@@ -79,7 +79,7 @@ impl Tool for BlueBubblesSendAttachmentTool {
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let chat_guid = match args.get("chat_guid").and_then(|v| v.as_str()) {
-            Some(g) if !g.is_empty() => g.to_string(),
+            Some(g) if !g.trim().is_empty() => g.trim().to_string(),
             _ => {
                 return Ok(ToolResult {
                     success: false,
@@ -89,7 +89,7 @@ impl Tool for BlueBubblesSendAttachmentTool {
             }
         };
         let filename = match args.get("filename").and_then(|v| v.as_str()) {
-            Some(f) if !f.is_empty() => f.to_string(),
+            Some(f) if !f.trim().is_empty() => f.trim().to_string(),
             _ => {
                 return Ok(ToolResult {
                     success: false,
