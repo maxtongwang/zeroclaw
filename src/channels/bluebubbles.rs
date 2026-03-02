@@ -587,7 +587,9 @@ impl BlueBubblesChannel {
         &self,
         payload: &serde_json::Value,
     ) -> Vec<ChannelMessage> {
-        if self.transcription.is_none() {
+        // Local whisper needs no config — allow transcription whenever
+        // whisper-cli is installed, even if [transcription] is not configured.
+        if self.transcription.is_none() && !super::transcription::whisper_available() {
             return self.parse_webhook_payload(payload);
         }
 
