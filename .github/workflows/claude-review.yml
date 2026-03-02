@@ -12,8 +12,13 @@ jobs:
   review:
     if: >
       (github.event_name == 'pull_request') ||
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') && github.event.issue.pull_request != '') ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude'))
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       contains(github.event.comment.body, '@claude') &&
+       contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+      (github.event_name == 'pull_request_review_comment' &&
+       contains(github.event.comment.body, '@claude') &&
+       contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -25,7 +30,7 @@ jobs:
       # For issue_comment events, checkout the PR head (not default branch)
       - name: Resolve PR head ref
         id: pr-ref
-        if: github.event_name == 'issue_comment'
+        if: github.event_name == 'issue_comment' && github.event.issue.pull_request != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

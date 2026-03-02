@@ -1177,7 +1177,8 @@ impl Channel for BlueBubblesChannel {
             .query(&[("password", &self.password)])
             .json(&body)
             .send()
-            .await?;
+            .await
+            .map_err(|e| anyhow::anyhow!("BlueBubbles send request failed: {}", e.without_url()))?;
 
         if resp.status().is_success() {
             return Ok(());
