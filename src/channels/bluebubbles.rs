@@ -1421,8 +1421,13 @@ impl Channel for BlueBubblesChannel {
         // Strip [EFFECT:name] tag from content before chunking/rendering
         let (content_no_effect, effect_id) = extract_effect(&message.content);
 
-        // Split into chunks (returns single-element vec when chunking is disabled)
-        let chunks = self.chunk_content(&content_no_effect);
+        // Split into chunks (returns single-element vec when chunking is disabled).
+        // Newline mode filters empty lines, so an all-whitespace content yields an
+        // empty vec — fall back to the full content so no message is silently dropped.
+        let mut chunks = self.chunk_content(&content_no_effect);
+        if chunks.is_empty() {
+            chunks = vec![content_no_effect.as_str()];
+        }
 
         for (idx, chunk) in chunks.into_iter().enumerate() {
             let attributed = markdown_to_attributed_body(chunk);

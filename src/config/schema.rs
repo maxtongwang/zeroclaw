@@ -7667,6 +7667,13 @@ impl Config {
                     "channels_config.bluebubbles.group_policy = \"allowlist\" requires at least one non-blank entry in group_allow_from"
                 );
             }
+            if let Some(limit) = bb.text_chunk_limit {
+                if limit == 0 {
+                    anyhow::bail!(
+                        "channels_config.bluebubbles.text_chunk_limit must be > 0 (use `chunk_mode` without a limit for newline splitting)"
+                    );
+                }
+            }
         }
 
         // Gateway
