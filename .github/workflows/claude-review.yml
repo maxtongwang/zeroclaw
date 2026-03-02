@@ -30,7 +30,7 @@ jobs:
       # For issue_comment events, checkout the PR head (not default branch)
       - name: Resolve PR head ref
         id: pr-ref
-        if: github.event_name == 'issue_comment' && github.event.issue.pull_request != ''
+        if: github.event_name == 'issue_comment' && github.event.issue.pull_request != null
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

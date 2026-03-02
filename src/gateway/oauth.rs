@@ -152,11 +152,11 @@ fn pkce_challenge(verifier: &str) -> String {
 }
 
 /// Shared HTTP client for all OAuth provider calls with a 30-second timeout.
-fn oauth_http_client() -> reqwest::Client {
+fn oauth_http_client() -> anyhow::Result<reqwest::Client> {
     reqwest::ClientBuilder::new()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .unwrap_or_default()
+        .map_err(|e| anyhow::anyhow!("Failed to build OAuth HTTP client: {e}"))
 }
 
 // ── Route handlers ────────────────────────────────────────────────────────────
@@ -310,10 +310,11 @@ async fn handle_google_callback(state: &AppState, query: OAuthCallback) -> Respo
     let dir = oauth_dir(state);
     let pkce_file = pkce_path(&dir, "google");
 
-    // Read and consume the stored "state\nverifier" payload.
+    // Read the stored "state\nverifier" payload. Do NOT delete the file yet —
+    // we must validate state first to prevent a forged callback from destroying
+    // a legitimate in-flight OAuth session.
     let (expected_state, verifier) = match tokio::fs::read_to_string(&pkce_file).await {
         Ok(payload) => {
-            let _ = tokio::fs::remove_file(&pkce_file).await;
             let mut parts = payload.splitn(2, '\n');
             let st = parts.next().unwrap_or("").to_string();
             let vf = parts.next().unwrap_or("").to_string();
@@ -343,6 +344,9 @@ async fn handle_google_callback(state: &AppState, query: OAuthCallback) -> Respo
             .into_response();
     }
 
+    // State validated — consume the PKCE session file to prevent replay.
+    let _ = tokio::fs::remove_file(&pkce_file).await;
+
     let (client_id, client_secret) = {
         let cfg = state.config.lock();
         (
@@ -354,7 +358,17 @@ async fn handle_google_callback(state: &AppState, query: OAuthCallback) -> Respo
     let redirect_uri = callback_url(state, "google");
 
     // Exchange code for tokens
-    let client = oauth_http_client();
+    let client = match oauth_http_client() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("OAuth client init failed: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Html(error_page("Server Error", "Unexpected server error")),
+            )
+                .into_response();
+        }
+    };
     let resp = client
         .post(GOOGLE_TOKEN_URL)
         .form(&[
@@ -461,7 +475,7 @@ async fn handle_google_callback(state: &AppState, query: OAuthCallback) -> Respo
 }
 
 async fn fetch_google_email(access_token: &str) -> Option<String> {
-    let client = oauth_http_client();
+    let client = oauth_http_client().ok()?;
     let resp = client
         .get("https://www.googleapis.com/oauth2/v2/userinfo")
         .bearer_auth(access_token)
@@ -558,10 +572,10 @@ pub async fn handle_auth_revoke(
 }
 
 async fn revoke_google_token(access_token: &str) -> anyhow::Result<()> {
-    let client = oauth_http_client();
+    let client = oauth_http_client()?;
     let resp = client
         .post("https://oauth2.googleapis.com/revoke")
-        .query(&[("token", access_token)])
+        .form(&[("token", access_token)])
         .send()
         .await?;
     if !resp.status().is_success() {
@@ -587,7 +601,7 @@ pub async fn refresh_google_token(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("No refresh_token stored. Reconnect at /auth/google"))?;
 
-    let client = oauth_http_client();
+    let client = oauth_http_client()?;
     let resp = client
         .post(GOOGLE_TOKEN_URL)
         .form(&[

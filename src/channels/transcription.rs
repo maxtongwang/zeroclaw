@@ -73,23 +73,19 @@ async fn transcribe_with_whisper_cpp(
         let ffmpeg = resolve_ffmpeg_bin().context(
             "ffmpeg not found — install ffmpeg to enable CAF transcription with whisper-cli",
         )?;
+        let tmp_str = tmp
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Temp WAV path contains non-UTF-8 characters"))?;
         let mut ffmpeg_cmd = Command::new(ffmpeg);
-        ffmpeg_cmd.args([
-            "-y",
-            "-i",
-            file_path,
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            tmp.to_str().unwrap_or(""),
-        ]);
+        ffmpeg_cmd.args(["-y", "-i", file_path, "-ar", "16000", "-ac", "1", tmp_str]);
         ffmpeg_cmd.kill_on_drop(true);
         let conv = tokio::time::timeout(std::time::Duration::from_secs(120), ffmpeg_cmd.output())
             .await
             .map_err(|_| anyhow::anyhow!("ffmpeg CAF→WAV conversion timed out after 120s"))?
             .context("ffmpeg CAF→WAV conversion failed")?;
         if !conv.status.success() {
+            // Clean up any partial output file before propagating the error.
+            let _ = tokio::fs::remove_file(&tmp).await;
             let stderr = String::from_utf8_lossy(&conv.stderr);
             anyhow::bail!("ffmpeg failed converting CAF: {stderr}");
         }
@@ -106,8 +102,26 @@ async fn transcribe_with_whisper_cpp(
         .unwrap_or("audio");
     let out_base = out_dir.join(stem);
 
-    let input_str = input_path.to_str().unwrap_or("");
-    let out_base_str = out_base.to_str().unwrap_or("");
+    let input_str = match input_path.to_str() {
+        Some(s) => s,
+        None => {
+            let _ = tokio::fs::remove_dir_all(&out_dir).await;
+            if let Some(ref tmp) = caf_tmp {
+                let _ = tokio::fs::remove_file(tmp).await;
+            }
+            anyhow::bail!("Input audio path contains non-UTF-8 characters");
+        }
+    };
+    let out_base_str = match out_base.to_str() {
+        Some(s) => s,
+        None => {
+            let _ = tokio::fs::remove_dir_all(&out_dir).await;
+            if let Some(ref tmp) = caf_tmp {
+                let _ = tokio::fs::remove_file(tmp).await;
+            }
+            anyhow::bail!("Output base path contains non-UTF-8 characters");
+        }
+    };
     tracing::debug!(
         "whisper-cli: {} -m {} -otxt -of {} -np -nt {}",
         bin,
@@ -191,6 +205,14 @@ async fn transcribe_with_python_whisper(file_path: &str) -> anyhow::Result<Strin
         .await
         .context("Failed to create whisper temp dir")?;
 
+    let tmp_dir_str = match tmp_dir.to_str() {
+        Some(s) => s,
+        None => {
+            let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+            anyhow::bail!("Whisper temp dir path contains non-UTF-8 characters");
+        }
+    };
+
     let mut whisper_cmd = Command::new(whisper_bin);
     whisper_cmd.args([
         "--model",
@@ -198,7 +220,7 @@ async fn transcribe_with_python_whisper(file_path: &str) -> anyhow::Result<Strin
         "--output_format",
         "txt",
         "--output_dir",
-        tmp_dir.to_str().unwrap_or(""),
+        tmp_dir_str,
         "--verbose",
         "False",
         file_path,

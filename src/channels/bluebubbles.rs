@@ -495,9 +495,8 @@ impl BlueBubblesChannel {
             })?;
         if !resp.status().is_success() {
             anyhow::bail!(
-                "BlueBubbles attachment download failed ({}): GUID={}",
-                resp.status(),
-                attachment_guid
+                "BlueBubbles attachment download failed ({})",
+                resp.status()
             );
         }
         // Reject before buffering when Content-Length already exceeds the cap.
