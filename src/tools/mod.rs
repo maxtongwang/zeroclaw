@@ -19,6 +19,7 @@ pub mod agents_ipc;
 pub mod apply_patch;
 pub mod auth_profile;
 pub mod bg_run;
+pub mod bluebubbles_group;
 pub mod browser;
 pub mod browser_open;
 pub mod channel_ack_config;
@@ -89,6 +90,7 @@ pub use apply_patch::ApplyPatchTool;
 pub use bg_run::{
     format_bg_result_for_injection, BgJob, BgJobStatus, BgJobStore, BgRunTool, BgStatusTool,
 };
+pub use bluebubbles_group::BlueBubblesGroupTool;
 pub use browser::{BrowserTool, ComputerUseConfig};
 pub use browser_open::BrowserOpenTool;
 pub use channel_ack_config::ChannelAckConfigTool;
@@ -627,6 +629,15 @@ pub fn all_tools_with_runtime(
             subagent_registry,
             security.clone(),
         )));
+    }
+
+    // BlueBubbles group management tools (enabled when BB channel is configured)
+    if let Some(bb) = root_config.channels_config.bluebubbles.as_ref() {
+        let server_url = bb.server_url.trim().to_string();
+        let password = bb.password.clone();
+        if !server_url.is_empty() {
+            tool_arcs.push(Arc::new(BlueBubblesGroupTool::new(server_url, password)));
+        }
     }
 
     // Feishu document tools (enabled when channel-lark feature is active)
