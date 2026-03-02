@@ -5082,6 +5082,16 @@ pub enum BlueBubblesGroupPolicy {
     Disabled,
 }
 
+/// How to split long outbound messages before sending via BlueBubbles.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlueBubblesChunkMode {
+    /// Split when the message exceeds `text_chunk_limit` characters (Unicode scalar values).
+    Length,
+    /// Split on each newline character (`\n`).
+    Newline,
+}
+
 /// BlueBubbles iMessage bridge channel configuration.
 ///
 /// BlueBubbles is a self-hosted macOS server that exposes iMessage via a
@@ -5115,6 +5125,13 @@ pub struct BlueBubblesConfig {
     /// inbound message. Default: `true`.
     #[serde(default = "default_true")]
     pub send_read_receipts: bool,
+    /// Maximum number of Unicode characters per outbound message chunk.
+    /// `None` (default) disables chunking. Requires `chunk_mode` to be set.
+    #[serde(default)]
+    pub text_chunk_limit: Option<usize>,
+    /// How to split long messages. `None` (default) disables chunking.
+    #[serde(default)]
+    pub chunk_mode: Option<BlueBubblesChunkMode>,
 }
 
 impl std::fmt::Debug for BlueBubblesConfig {
@@ -5133,6 +5150,8 @@ impl std::fmt::Debug for BlueBubblesConfig {
             .field("group_policy", &self.group_policy)
             .field("group_allow_from", &self.group_allow_from)
             .field("send_read_receipts", &self.send_read_receipts)
+            .field("text_chunk_limit", &self.text_chunk_limit)
+            .field("chunk_mode", &self.chunk_mode)
             .finish()
     }
 }
@@ -9383,6 +9402,8 @@ mod tests {
             group_policy: BlueBubblesGroupPolicy::default(),
             group_allow_from: vec![],
             send_read_receipts: true,
+            text_chunk_limit: None,
+            chunk_mode: None,
         };
 
         let debug_output = format!("{cfg:?}");

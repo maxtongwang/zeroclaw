@@ -1,5 +1,5 @@
 use super::traits::{Channel, ChannelMessage, SendMessage};
-use crate::config::schema::{BlueBubblesDmPolicy, BlueBubblesGroupPolicy};
+use crate::config::schema::{BlueBubblesChunkMode, BlueBubblesDmPolicy, BlueBubblesGroupPolicy};
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
@@ -161,6 +161,10 @@ pub struct BlueBubblesChannel {
     /// Optional Groq Whisper transcription config — populated by `with_transcription`
     /// when `[transcription]` is configured and enabled.
     transcription: Option<crate::config::TranscriptionConfig>,
+    /// Maximum characters per outbound chunk. `None` = no chunking.
+    text_chunk_limit: Option<usize>,
+    /// Chunking strategy. `None` = no chunking.
+    chunk_mode: Option<BlueBubblesChunkMode>,
 }
 
 impl BlueBubblesChannel {
@@ -186,6 +190,8 @@ impl BlueBubblesChannel {
             from_me_cache: Mutex::new(FromMeCache::new()),
             typing_handles: Mutex::new(HashMap::new()),
             transcription: None,
+            text_chunk_limit: None,
+            chunk_mode: None,
         }
     }
 
@@ -202,6 +208,61 @@ impl BlueBubblesChannel {
         self.group_allow_from = group_allow_from;
         self.send_read_receipts = send_read_receipts;
         self
+    }
+
+    /// Configure outbound message chunking.
+    ///
+    /// When both `text_chunk_limit` and `chunk_mode` are `Some`, long messages are
+    /// split and sent as sequential API calls. If either is `None`, chunking is disabled.
+    pub(crate) fn with_chunking(
+        mut self,
+        text_chunk_limit: Option<usize>,
+        chunk_mode: Option<BlueBubblesChunkMode>,
+    ) -> Self {
+        self.text_chunk_limit = text_chunk_limit;
+        self.chunk_mode = chunk_mode;
+        self
+    }
+
+    /// Split `text` into chunks according to the configured chunking strategy.
+    ///
+    /// Returns a single-element vec (the original text) when chunking is disabled
+    /// or the text is within the limit.
+    fn chunk_content<'a>(&self, text: &'a str) -> Vec<&'a str> {
+        match (self.chunk_mode, self.text_chunk_limit) {
+            (Some(BlueBubblesChunkMode::Newline), _) => {
+                text.split('\n').filter(|s| !s.is_empty()).collect()
+            }
+            (Some(BlueBubblesChunkMode::Length), Some(limit)) if limit > 0 => {
+                if text.chars().count() <= limit {
+                    return vec![text];
+                }
+                let mut chunks = Vec::new();
+                let mut remaining = text;
+                while !remaining.is_empty() {
+                    if remaining.chars().count() <= limit {
+                        chunks.push(remaining);
+                        break;
+                    }
+                    // Find the byte offset of the `limit`-th character
+                    let cut = remaining
+                        .char_indices()
+                        .nth(limit)
+                        .map(|(i, _)| i)
+                        .unwrap_or(remaining.len());
+                    // Walk back to the last whitespace to avoid splitting mid-word
+                    let split_at = remaining[..cut].rfind(char::is_whitespace).unwrap_or(cut);
+                    let (chunk, rest) = remaining.split_at(split_at);
+                    let chunk = chunk.trim_end();
+                    if !chunk.is_empty() {
+                        chunks.push(chunk);
+                    }
+                    remaining = rest.trim_start();
+                }
+                chunks
+            }
+            _ => vec![text],
+        }
     }
 
     /// Configure voice transcription via Groq Whisper.
@@ -1253,51 +1314,61 @@ impl Channel for BlueBubblesChannel {
     ///
     /// `message.recipient` must be a chat GUID (e.g. `iMessage;-;+15_551_234_567`).
     /// Authentication is via `?password=` query param (not a Bearer header).
+    ///
+    /// When `text_chunk_limit` / `chunk_mode` are configured, the content is split
+    /// into multiple chunks and each is sent as a sequential API call. The
+    /// `[EFFECT:name]` tag and attributed body are applied per chunk.
     async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
         let url = self.api_url("/api/v1/message/text");
 
-        // Strip [EFFECT:name] tag from content before rendering
+        // Strip [EFFECT:name] tag from content before chunking/rendering
         let (content_no_effect, effect_id) = extract_effect(&message.content);
-        let attributed = markdown_to_attributed_body(&content_no_effect);
 
-        // Plain-text fallback: concatenate all segment strings (markers stripped)
-        let plain: String = attributed
-            .iter()
-            .filter_map(|s| s.get("string").and_then(|v| v.as_str()))
-            .collect();
+        // Split into chunks (returns single-element vec when chunking is disabled)
+        let chunks = self.chunk_content(&content_no_effect);
 
-        let mut body = serde_json::json!({
-            "chatGuid": message.recipient,
-            "tempGuid": Uuid::new_v4().to_string(),
-            "message": plain,
-            "method": "private-api",
-            "attributedBody": attributed,
-        });
+        for chunk in chunks {
+            let attributed = markdown_to_attributed_body(chunk);
 
-        // Append effectId if present
-        if let Some(ref eid) = effect_id {
-            body.as_object_mut()
-                .expect("serde_json::json!({}) always produces an object")
-                .insert("effectId".into(), serde_json::Value::String(eid.clone()));
+            // Plain-text fallback: concatenate all segment strings (markers stripped)
+            let plain: String = attributed
+                .iter()
+                .filter_map(|s| s.get("string").and_then(|v| v.as_str()))
+                .collect();
+
+            let mut body = serde_json::json!({
+                "chatGuid": message.recipient,
+                "tempGuid": Uuid::new_v4().to_string(),
+                "message": plain,
+                "method": "private-api",
+                "attributedBody": attributed,
+            });
+
+            // Append effectId if present (only on first chunk for multi-chunk sends)
+            if let Some(ref eid) = effect_id {
+                body.as_object_mut()
+                    .expect("serde_json::json!({}) always produces an object")
+                    .insert("effectId".into(), serde_json::Value::String(eid.clone()));
+            }
+
+            let resp = self
+                .client
+                .post(&url)
+                .query(&[("password", &self.password)])
+                .json(&body)
+                .send()
+                .await?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let error_body = resp.text().await.unwrap_or_default();
+                let sanitized = crate::providers::sanitize_api_error(&error_body);
+                tracing::error!("BlueBubbles send failed: {status} — {sanitized}");
+                anyhow::bail!("BlueBubbles API error: {status}");
+            }
         }
 
-        let resp = self
-            .client
-            .post(&url)
-            .query(&[("password", &self.password)])
-            .json(&body)
-            .send()
-            .await?;
-
-        if resp.status().is_success() {
-            return Ok(());
-        }
-
-        let status = resp.status();
-        let error_body = resp.text().await.unwrap_or_default();
-        let sanitized = crate::providers::sanitize_api_error(&error_body);
-        tracing::error!("BlueBubbles send failed: {status} — {sanitized}");
-        anyhow::bail!("BlueBubbles API error: {status}");
+        Ok(())
     }
 
     /// Send a typing indicator to the given chat GUID via the BB Private API.
