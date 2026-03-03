@@ -20,15 +20,15 @@ pub struct BlueBubblesGroupTool {
 }
 
 impl BlueBubblesGroupTool {
-    pub fn new(server_url: String, password: String) -> Self {
-        Self {
+    pub fn new(server_url: String, password: String) -> anyhow::Result<Self> {
+        Ok(Self {
             server_url: server_url.trim_end_matches('/').to_string(),
             password,
             client: reqwest::ClientBuilder::new()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
-        }
+                .map_err(|e| anyhow::anyhow!("Failed to build BlueBubblesGroupTool HTTP client: {e}"))?,
+        })
     }
 
     fn api_url(&self, path: &str) -> String {
@@ -307,6 +307,8 @@ impl Tool for BlueBubblesGroupTool {
 
             "set_group_icon" => {
                 const MAX_ICON_BYTES: usize = 5 * 1024 * 1024; // 5 MiB decoded
+                // Base64 is ~4/3 of decoded size; 7 MiB base64 input cannot exceed 5 MiB decoded.
+                const MAX_ICON_B64_LEN: usize = 7 * 1024 * 1024;
                 let icon_b64 = match args.get("icon_base64").and_then(|v| v.as_str()) {
                     Some(b) if !b.trim().is_empty() => b.trim().to_string(),
                     _ => {
@@ -317,6 +319,14 @@ impl Tool for BlueBubblesGroupTool {
                         })
                     }
                 };
+                // Reject oversized input before allocating the decoded buffer.
+                if icon_b64.len() > MAX_ICON_B64_LEN {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some("icon_base64 input exceeds 7 MiB pre-decode limit".into()),
+                    });
+                }
                 let icon_bytes = match base64::Engine::decode(
                     &base64::engine::general_purpose::STANDARD,
                     &icon_b64,

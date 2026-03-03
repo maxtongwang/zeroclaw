@@ -636,7 +636,10 @@ pub fn all_tools_with_runtime(
         let server_url = bb.server_url.trim().to_string();
         let password = bb.password.trim().to_string();
         if !server_url.is_empty() && !password.is_empty() {
-            tool_arcs.push(Arc::new(BlueBubblesGroupTool::new(server_url, password)));
+            match BlueBubblesGroupTool::new(server_url, password) {
+                Ok(tool) => tool_arcs.push(Arc::new(tool)),
+                Err(e) => tracing::error!("Failed to initialize BlueBubblesGroupTool: {e}"),
+            }
         }
     }
 
