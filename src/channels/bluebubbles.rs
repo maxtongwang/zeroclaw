@@ -358,7 +358,9 @@ impl BlueBubblesChannel {
         });
 
         match keyword {
-            Some(kw) => !text.to_ascii_lowercase().contains(kw),
+            // Lowercase `kw` to handle the allowed_senders fallback path which is not
+            // pre-lowercased (only `mention_keyword` is stored in lowercase at init).
+            Some(kw) => !text.to_ascii_lowercase().contains(&kw.to_ascii_lowercase()),
             // No keyword can be resolved — always block (warning was already emitted at startup).
             None => true,
         }
