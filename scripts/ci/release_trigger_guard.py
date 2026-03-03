@@ -79,6 +79,18 @@ def build_markdown(report: dict) -> str:
     lines.append(f"- Tag version: `{metadata.get('tag_version')}`")
     lines.append("")
 
+    ci_gate = report.get("ci_gate", {})
+    if ci_gate.get("ci_status"):
+        lines.append("## CI Gate")
+        lines.append(f"- CI status: `{ci_gate['ci_status']}`")
+        lines.append("")
+
+    dry_run_gate = report.get("dry_run_gate", {})
+    if dry_run_gate.get("prior_successful_runs") is not None:
+        lines.append("## Dry Run Gate")
+        lines.append(f"- Prior successful runs: `{dry_run_gate['prior_successful_runs']}`")
+        lines.append("")
+
     if report["violations"]:
         lines.append("## Violations")
         for item in report["violations"]:
@@ -139,6 +151,8 @@ def main() -> int:
     tagger_date: str | None = None
     cargo_version: str | None = None
     tag_version: str | None = None
+    ci_status: str | None = None
+    dry_run_count: int | None = None
 
     if publish_release:
         stable_match = STABLE_TAG_RE.fullmatch(args.release_tag)
@@ -293,6 +307,78 @@ def main() -> int:
                         except RuntimeError as exc:
                             warnings.append(f"Failed to inspect tagger metadata for `{args.release_tag}`: {exc}")
 
+                    # --- CI green gate (blocking) ---
+                    if tag_commit:
+                        ci_check_proc = subprocess.run(
+                            [
+                                "gh", "api",
+                                f"repos/{args.repository}/commits/{tag_commit}/check-runs",
+                                "--jq",
+                                '[.check_runs[] | select(.name == "CI Required Gate")] | '
+                                'if length == 0 then "not_found" '
+                                'elif .[0].conclusion == "success" then "success" '
+                                'elif .[0].status != "completed" then "pending" '
+                                'else .[0].conclusion end',
+                            ],
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        ci_status = ci_check_proc.stdout.strip() if ci_check_proc.returncode == 0 else "api_error"
+
+                        if ci_status == "success":
+                            pass  # CI passed on the tagged commit
+                        elif ci_status == "not_found":
+                            violations.append(
+                                f"CI Required Gate check-run not found for commit {tag_commit}. "
+                                "Ensure ci-run.yml has completed on main before tagging."
+                            )
+                        elif ci_status == "pending":
+                            violations.append(
+                                f"CI is still running on commit {tag_commit}. "
+                                "Wait for CI Required Gate to complete before publishing."
+                            )
+                        elif ci_status == "api_error":
+                            violations.append(
+                                f"Failed to query CI status for commit {tag_commit}: "
+                                f"{ci_check_proc.stderr.strip()}"
+                            )
+                        else:
+                            violations.append(
+                                f"CI Required Gate conclusion is '{ci_status}' (expected 'success') "
+                                f"for commit {tag_commit}."
+                            )
+
+                    # --- Dry run verification gate (advisory) ---
+                    if tag_commit:
+                        dry_run_proc = subprocess.run(
+                            [
+                                "gh", "api",
+                                f"repos/{args.repository}/actions/workflows/pub-release.yml/runs",
+                                "--jq",
+                                f'[.workflow_runs[] | select(.head_sha == "{tag_commit}" and .conclusion == "success")] | length',
+                            ],
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        dry_run_count_str = dry_run_proc.stdout.strip() if dry_run_proc.returncode == 0 else ""
+                        try:
+                            dry_run_count = int(dry_run_count_str)
+                        except ValueError:
+                            dry_run_count = -1
+
+                        if dry_run_count == -1:
+                            warnings.append(
+                                f"Could not query dry-run history for commit {tag_commit}. "
+                                "Manual verification recommended."
+                            )
+                        elif dry_run_count == 0:
+                            warnings.append(
+                                f"No prior successful pub-release.yml run found for commit {tag_commit}. "
+                                "Consider running a verification build (publish_release=false) first."
+                            )
+
                     if authorized_tagger_emails:
                         normalized_tagger = normalize_email(tagger_email or "")
                         if not normalized_tagger:
@@ -346,6 +432,13 @@ def main() -> int:
             "tagger_date": tagger_date,
             "tag_version": tag_version,
             "cargo_version": cargo_version,
+        },
+        "ci_gate": {
+            "tag_commit": tag_commit,
+            "ci_status": ci_status if publish_release and tag_commit else None,
+        },
+        "dry_run_gate": {
+            "prior_successful_runs": dry_run_count if publish_release and tag_commit else None,
         },
         "trigger_provenance": {
             "repository": args.repository,
