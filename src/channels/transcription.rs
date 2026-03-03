@@ -40,9 +40,17 @@ fn normalize_audio_filename(file_name: &str) -> String {
 /// CAF files (iMessage voice memos) are pre-converted to WAV via ffmpeg because
 /// whisper-cli does not support CAF natively. Python whisper handles CAF directly.
 pub async fn transcribe_audio_local(file_path: &str) -> anyhow::Result<String> {
-    // Prefer whisper-cli (whisper.cpp) when available.
+    // Prefer whisper-cli (whisper.cpp) when available. If it fails for any
+    // reason (missing ffmpeg, timeout, non-zero exit), fall back to Python
+    // whisper rather than propagating the error immediately — the user may
+    // have whisper.cpp installed but ffmpeg absent for a specific format.
     if let Some((bin, model)) = resolve_whisper_cpp() {
-        return transcribe_with_whisper_cpp(file_path, bin, model).await;
+        match transcribe_with_whisper_cpp(file_path, bin, model).await {
+            Ok(t) => return Ok(t),
+            Err(e) => {
+                tracing::warn!("whisper-cli failed ({e:#}), falling back to Python whisper");
+            }
+        }
     }
 
     // Fall back to Python whisper.
@@ -193,10 +201,7 @@ async fn transcribe_with_whisper_cpp(
     let txt_path = out_dir.join(format!("{stem}.txt"));
     let txt = tokio::fs::read_to_string(&txt_path).await.map_err(|e| {
         let _ = std::fs::remove_dir_all(&out_dir);
-        anyhow::anyhow!(
-            "Failed to read whisper-cli output at {}: {e}",
-            txt_path.display()
-        )
+        anyhow::anyhow!("Failed to read whisper-cli transcript output: {e}")
     })?;
     let _ = tokio::fs::remove_dir_all(&out_dir).await;
 

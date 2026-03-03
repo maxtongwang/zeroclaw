@@ -170,7 +170,7 @@ Field names differ by channel:
 - `allowed_users` (Telegram/Discord/Slack/Mattermost/Matrix/IRC/Lark/Feishu/DingTalk/QQ/Napcat/Nextcloud Talk/ACP)
 - `allowed_from` (Signal)
 - `allowed_numbers` (WhatsApp)
-- `allowed_senders` (Email/Linq)
+- `allowed_senders` (Email/Linq/BlueBubbles)
 - `allowed_contacts` (iMessage)
 - `allowed_pubkeys` (Nostr)
 
