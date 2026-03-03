@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use uuid::Uuid;
 
+use crate::security::SecurityPolicy;
 use crate::tools::traits::{Tool, ToolResult};
 
 /// Thread-aware reply, message edit, and message retract for BlueBubbles iMessage.
@@ -13,14 +16,20 @@ use crate::tools::traits::{Tool, ToolResult};
 /// - edit:   POST `/api/v1/message/{guid}/edit`
 /// - unsend: POST `/api/v1/message/{guid}/unsend`
 pub struct BlueBubblesMessageTool {
+    security: Arc<SecurityPolicy>,
     server_url: String,
     password: String,
     client: reqwest::Client,
 }
 
 impl BlueBubblesMessageTool {
-    pub fn new(server_url: String, password: String) -> anyhow::Result<Self> {
+    pub fn new(
+        security: Arc<SecurityPolicy>,
+        server_url: String,
+        password: String,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
+            security,
             server_url: server_url.trim_end_matches('/').to_string(),
             password,
             client: reqwest::ClientBuilder::new()
@@ -77,6 +86,20 @@ impl Tool for BlueBubblesMessageTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        if !self.security.can_act() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("Action blocked: read-only autonomy level".into()),
+            });
+        }
+        if !self.security.record_action() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("Rate limit exceeded: too many actions in the last hour".into()),
+            });
+        }
         let action = match args.get("action").and_then(|v| v.as_str()) {
             Some(a) if !a.trim().is_empty() => a.trim().to_string(),
             _ => {
