@@ -93,9 +93,14 @@ async fn transcribe_with_whisper_cpp(
     };
 
     let out_dir = std::env::temp_dir().join(format!("zc_wpp_{}", uuid::Uuid::new_v4()));
-    tokio::fs::create_dir_all(&out_dir)
-        .await
-        .context("Failed to create whisper-cli output dir")?;
+    if let Err(e) = tokio::fs::create_dir_all(&out_dir).await {
+        if let Some(ref tmp) = caf_tmp {
+            let _ = tokio::fs::remove_file(tmp).await;
+        }
+        return Err(anyhow::anyhow!(
+            "Failed to create whisper-cli output dir: {e}"
+        ));
+    }
     let stem = input_path
         .file_stem()
         .and_then(|s| s.to_str())

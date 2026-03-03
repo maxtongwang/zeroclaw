@@ -25,7 +25,6 @@ jobs:
       pull-requests: write
       issues: write
       actions: read
-      id-token: write
     steps:
       # For issue_comment events, checkout the PR head (not default branch)
       - name: Resolve PR head ref

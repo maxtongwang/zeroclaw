@@ -2346,15 +2346,20 @@ async fn handle_bluebubbles_webhook(
                 truncate_with_ellipsis(&msg.content, 50)
             );
 
+            let session_id = gateway_message_session_id(msg);
             if state_bg.auto_save {
                 let key = bluebubbles_memory_key(msg);
                 let _ = state_bg
                     .mem
-                    .store(&key, &msg.content, MemoryCategory::Conversation, None)
+                    .store(
+                        &key,
+                        &msg.content,
+                        MemoryCategory::Conversation,
+                        Some(&session_id),
+                    )
                     .await;
             }
 
-            let session_id = gateway_message_session_id(msg);
             let _ = bb.start_typing(&msg.reply_target).await;
             let leak_guard_cfg = gateway_outbound_leak_guard_snapshot(&state_bg);
 

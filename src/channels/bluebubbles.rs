@@ -494,10 +494,7 @@ impl BlueBubblesChannel {
                 anyhow::anyhow!("BB attachment download request failed: {}", e.without_url())
             })?;
         if !resp.status().is_success() {
-            anyhow::bail!(
-                "BlueBubbles attachment download failed ({})",
-                resp.status()
-            );
+            anyhow::bail!("BlueBubbles attachment download failed ({})", resp.status());
         }
         // Reject before buffering when Content-Length already exceeds the cap.
         if let Some(len) = resp.content_length() {
