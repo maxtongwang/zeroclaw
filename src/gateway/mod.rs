@@ -594,6 +594,8 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .bluebubbles
         .as_ref()
         .and_then(|bb| bb.webhook_secret.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         .map(Arc::from);
 
     // WATI channel (if configured)
