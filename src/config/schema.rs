@@ -5186,7 +5186,10 @@ impl std::fmt::Debug for BlueBubblesConfig {
             .field("chunk_mode", &self.chunk_mode)
             .field("require_mention_in_groups", &self.require_mention_in_groups)
             .field("mention_keyword", &self.mention_keyword)
-            .field("groups", &self.groups)
+            .field(
+                "groups",
+                &format!("[{} items]", self.groups.len()),
+            )
             .finish()
     }
 }
