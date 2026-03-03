@@ -16,3 +16,7 @@
 
 - 設定キー名は英語のまま保持します。
 - 実行時挙動の定義は英語版原文を優先します。
+
+## 更新メモ
+
+- `[channels_config.bluebubbles]` に追加: `dm_policy`、`group_policy`、`group_allow_from`、`send_read_receipts`、`require_mention_in_groups`、`mention_keyword`。詳細は英語版原文を参照。

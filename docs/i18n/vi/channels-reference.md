@@ -358,6 +358,65 @@ Ghi chú:
 allowed_contacts = ["*"]
 ```
 
+### 4.15 BlueBubbles (iMessage qua máy chủ BlueBubbles)
+
+[BlueBubbles](https://bluebubbles.app) là máy chủ macOS tự lưu trữ, cung cấp iMessage qua REST API và webhook push.
+
+```toml
+[channels_config.bluebubbles]
+server_url = "http://192.168.1.100:1234"  # hoặc URL ngrok
+password   = "mật-khẩu-bb-của-bạn"
+
+# Danh sách người gửi được phép (số điện thoại hoặc Apple ID). Mặc định: cho phép tất cả.
+allowed_senders = ["+15551234567", "user@example.com"]
+# Danh sách người gửi bị bỏ qua (ví dụ: loại bỏ tin nhắn gửi đi được echo lại).
+ignore_senders  = []
+# Secret dùng cho xác thực webhook inbound (Authorization: Bearer <secret>).
+webhook_secret  = "secret-tùy-chọn"
+
+# Chính sách DM: "open" | "allowlist" | "disabled". Mặc định: "open".
+dm_policy = "open"
+# Chính sách nhóm: "open" | "allowlist" | "disabled". Mặc định: "open".
+group_policy = "open"
+# Các chat GUID nhóm được phép khi group_policy = "allowlist". Dùng ["*"] cho tất cả.
+group_allow_from = ["iMessage;+;chat-abc123"]
+# Gửi read receipt đến BB sau mỗi tin nhắn đã xử lý. Mặc định: true.
+send_read_receipts = true
+
+# --- Phân đoạn văn bản (tùy chọn) ---
+# Số ký tự Unicode tối đa mỗi tin nhắn gửi đi. Bỏ qua để tắt phân đoạn.
+# text_chunk_limit = 4000
+# Chiến lược phân đoạn: "length" (chia theo ranh giới từ) | "newline" (chia theo \n).
+# chunk_mode = "length"
+
+# --- Yêu cầu đề cập trong nhóm (tùy chọn) ---
+# Yêu cầu tin nhắn nhóm phải chứa từ khóa đề cập trước khi bot phản hồi.
+# Mặc định: false. DM không bao giờ bị yêu cầu đề cập.
+# require_mention_in_groups = false
+# Từ khóa khớp không phân biệt hoa thường cho kiểm tra đề cập.
+# Mặc định: mục đầu tiên có thể giải quyết trong allowed_senders.
+# mention_keyword = "Hey Bot"
+
+# Ghi đè đề cập theo từng nhóm (tùy chọn). Khóa = chat GUID.
+# [channels_config.bluebubbles.groups."iMessage;+;chat-abc123"]
+# require_mention = false
+```
+
+Hành vi chính sách:
+
+| `dm_policy` | `allowed_senders` | Kết quả                              |
+| ----------- | ----------------- | ------------------------------------ |
+| `open`      | trống             | tất cả DM được phép                  |
+| `open`      | không trống       | chỉ những người gửi trong danh sách  |
+| `allowlist` | trống             | tất cả DM bị từ chối                 |
+| `allowlist` | không trống       | chỉ những người gửi trong danh sách  |
+| `disabled`  | bất kỳ            | tất cả DM bị bỏ qua (không phản hồi) |
+
+Chính sách nhóm hoạt động tương tự bằng cách sử dụng `group_allow_from` (chat GUID) thay cho `allowed_senders`.
+Khi kiểm tra đề cập được kích hoạt cho nhóm, văn bản tin nhắn phải chứa `mention_keyword` (khớp chuỗi không phân biệt hoa thường).
+Nếu không tìm thấy từ khóa, tin nhắn bị bỏ qua — không phản hồi, không lỗi.
+DM không bao giờ bị yêu cầu đề cập.
+
 ---
 
 ## 5. Quy trình xác thực
@@ -407,27 +466,28 @@ RUST_LOG=info zeroclaw daemon 2>&1 | tee /tmp/zeroclaw.log
 Sau đó lọc các sự kiện channel/gateway:
 
 ```bash
-rg -n "Matrix|Telegram|Discord|Slack|Mattermost|Signal|WhatsApp|Email|IRC|Lark|DingTalk|QQ|iMessage|Webhook|Channel" /tmp/zeroclaw.log
+rg -n "Matrix|Telegram|Discord|Slack|Mattermost|Signal|WhatsApp|Email|IRC|Lark|DingTalk|QQ|BlueBubbles|iMessage|Webhook|Channel" /tmp/zeroclaw.log
 ```
 
 ### 7.2 Bảng từ khóa
 
-| Thành phần                   | Tín hiệu khởi động / hoạt động bình thường                                                                      | Tín hiệu ủy quyền / chính sách                                                                                                                                                        | Tín hiệu truyền tải / lỗi                                                                                                 |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| Telegram                     | `Telegram channel listening for messages...`                                                                    | `Telegram: ignoring message from unauthorized user:`                                                                                                                                  | `Telegram poll error:` / `Telegram parse error:` / `Telegram polling conflict (409):`                                     |
-| Discord                      | `Discord: connected and identified`                                                                             | `Discord: ignoring message from unauthorized user:`                                                                                                                                   | `Discord: received Reconnect (op 7)` / `Discord: received Invalid Session (op 9)`                                         |
-| Slack                        | `Slack channel listening on #`                                                                                  | `Slack: ignoring message from unauthorized user:`                                                                                                                                     | `Slack poll error:` / `Slack parse error:`                                                                                |
-| Mattermost                   | `Mattermost channel listening on`                                                                               | `Mattermost: ignoring message from unauthorized user:`                                                                                                                                | `Mattermost poll error:` / `Mattermost parse error:`                                                                      |
-| Matrix                       | `Matrix channel listening on room` / `Matrix room ... is encrypted; E2EE decryption is enabled via matrix-sdk.` | `Matrix whoami failed; falling back to configured session hints for E2EE session restore:` / `Matrix whoami failed while resolving listener user_id; using configured user_id hint:`  | `Matrix sync error: ... retrying...`                                                                                      |
-| Signal                       | `Signal channel listening via SSE on`                                                                           | (kiểm tra allowlist được thực thi bởi `allowed_from`)                                                                                                                                 | `Signal SSE returned ...` / `Signal SSE connect error:`                                                                   |
-| WhatsApp (channel)           | `WhatsApp channel active (webhook mode).` / `WhatsApp Web connected successfully`                               | `WhatsApp: ignoring message from unauthorized number:` / `WhatsApp Web: message from ... not in allowed list`                                                                         | `WhatsApp send failed:` / `WhatsApp Web stream error:`                                                                    |
-| Webhook / WhatsApp (gateway) | `WhatsApp webhook verified successfully`                                                                        | `Webhook: rejected — not paired / invalid bearer token` / `Webhook: rejected request — invalid or missing X-Webhook-Secret` / `WhatsApp webhook verification failed — token mismatch` | `Webhook JSON parse error:`                                                                                               |
-| Email                        | `Email polling every ...` / `Email sent to ...`                                                                 | `Blocked email from ...`                                                                                                                                                              | `Email poll failed:` / `Email poll task panicked:`                                                                        |
-| IRC                          | `IRC channel connecting to ...` / `IRC registered as ...`                                                       | (kiểm tra allowlist được thực thi bởi `allowed_users`)                                                                                                                                | `IRC SASL authentication failed (...)` / `IRC server does not support SASL...` / `IRC nickname ... is in use, trying ...` |
-| Lark / Feishu                | `Lark: WS connected` / `Lark event callback server listening on`                                                | `Lark WS: ignoring ... (not in allowed_users)` / `Lark: ignoring message from unauthorized user:`                                                                                     | `Lark: ping failed, reconnecting` / `Lark: heartbeat timeout, reconnecting` / `Lark: WS read error:`                      |
-| DingTalk                     | `DingTalk: connected and listening for messages...`                                                             | `DingTalk: ignoring message from unauthorized user:`                                                                                                                                  | `DingTalk WebSocket error:` / `DingTalk: message channel closed`                                                          |
-| QQ                           | `QQ: connected and identified`                                                                                  | `QQ: ignoring C2C message from unauthorized user:` / `QQ: ignoring group message from unauthorized user:`                                                                             | `QQ: received Reconnect (op 7)` / `QQ: received Invalid Session (op 9)` / `QQ: message channel closed`                    |
-| iMessage                     | `iMessage channel listening (AppleScript bridge)...`                                                            | (allowlist liên hệ được thực thi bởi `allowed_contacts`)                                                                                                                              | `iMessage poll error:`                                                                                                    |
+| Thành phần                   | Tín hiệu khởi động / hoạt động bình thường                                                                      | Tín hiệu ủy quyền / chính sách                                                                                                                                                        | Tín hiệu truyền tải / lỗi                                                                                                           |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Telegram                     | `Telegram channel listening for messages...`                                                                    | `Telegram: ignoring message from unauthorized user:`                                                                                                                                  | `Telegram poll error:` / `Telegram parse error:` / `Telegram polling conflict (409):`                                               |
+| Discord                      | `Discord: connected and identified`                                                                             | `Discord: ignoring message from unauthorized user:`                                                                                                                                   | `Discord: received Reconnect (op 7)` / `Discord: received Invalid Session (op 9)`                                                   |
+| Slack                        | `Slack channel listening on #`                                                                                  | `Slack: ignoring message from unauthorized user:`                                                                                                                                     | `Slack poll error:` / `Slack parse error:`                                                                                          |
+| Mattermost                   | `Mattermost channel listening on`                                                                               | `Mattermost: ignoring message from unauthorized user:`                                                                                                                                | `Mattermost poll error:` / `Mattermost parse error:`                                                                                |
+| Matrix                       | `Matrix channel listening on room` / `Matrix room ... is encrypted; E2EE decryption is enabled via matrix-sdk.` | `Matrix whoami failed; falling back to configured session hints for E2EE session restore:` / `Matrix whoami failed while resolving listener user_id; using configured user_id hint:`  | `Matrix sync error: ... retrying...`                                                                                                |
+| Signal                       | `Signal channel listening via SSE on`                                                                           | (kiểm tra allowlist được thực thi bởi `allowed_from`)                                                                                                                                 | `Signal SSE returned ...` / `Signal SSE connect error:`                                                                             |
+| WhatsApp (channel)           | `WhatsApp channel active (webhook mode).` / `WhatsApp Web connected successfully`                               | `WhatsApp: ignoring message from unauthorized number:` / `WhatsApp Web: message from ... not in allowed list`                                                                         | `WhatsApp send failed:` / `WhatsApp Web stream error:`                                                                              |
+| Webhook / WhatsApp (gateway) | `WhatsApp webhook verified successfully`                                                                        | `Webhook: rejected — not paired / invalid bearer token` / `Webhook: rejected request — invalid or missing X-Webhook-Secret` / `WhatsApp webhook verification failed — token mismatch` | `Webhook JSON parse error:`                                                                                                         |
+| Email                        | `Email polling every ...` / `Email sent to ...`                                                                 | `Blocked email from ...`                                                                                                                                                              | `Email poll failed:` / `Email poll task panicked:`                                                                                  |
+| IRC                          | `IRC channel connecting to ...` / `IRC registered as ...`                                                       | (kiểm tra allowlist được thực thi bởi `allowed_users`)                                                                                                                                | `IRC SASL authentication failed (...)` / `IRC server does not support SASL...` / `IRC nickname ... is in use, trying ...`           |
+| Lark / Feishu                | `Lark: WS connected` / `Lark event callback server listening on`                                                | `Lark WS: ignoring ... (not in allowed_users)` / `Lark: ignoring message from unauthorized user:`                                                                                     | `Lark: ping failed, reconnecting` / `Lark: heartbeat timeout, reconnecting` / `Lark: WS read error:`                                |
+| DingTalk                     | `DingTalk: connected and listening for messages...`                                                             | `DingTalk: ignoring message from unauthorized user:`                                                                                                                                  | `DingTalk WebSocket error:` / `DingTalk: message channel closed`                                                                    |
+| QQ                           | `QQ: connected and identified`                                                                                  | `QQ: ignoring C2C message from unauthorized user:` / `QQ: ignoring group message from unauthorized user:`                                                                             | `QQ: received Reconnect (op 7)` / `QQ: received Invalid Session (op 9)` / `QQ: message channel closed`                              |
+| BlueBubbles (gateway)        | `POST /bluebubbles — BlueBubbles iMessage webhook`                                                              | `BlueBubbles webhook auth failed (missing or invalid Bearer token)` / `BlueBubbles: ignoring message from unauthorized sender:`                                                       | `BlueBubbles worker pool exhausted — dropping webhook` / `Failed to send BlueBubbles reply:` / `LLM error for BlueBubbles message:` |
+| iMessage                     | `iMessage channel listening (AppleScript bridge)...`                                                            | (allowlist liên hệ được thực thi bởi `allowed_contacts`)                                                                                                                              | `iMessage poll error:`                                                                                                              |
 
 ### 7.3 Từ khóa của runtime supervisor
 

@@ -8,7 +8,7 @@
 
 ## 主な用途
 
-- Telegram/Discord/Slack などの機能差分を確認する
+- Telegram/Discord/Slack/BlueBubbles などの機能差分を確認する
 - allowlist と安全境界を確認する
 - メッセージ送受信トラブルを切り分ける
 

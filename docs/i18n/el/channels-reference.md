@@ -50,6 +50,39 @@ cli = true # Ενεργοποίηση διεπαφής τερματικού (CLI
 
 ---
 
+## 4.1 Ρύθμιση BlueBubbles (iMessage)
+
+Το [BlueBubbles](https://bluebubbles.app) είναι αυτο-φιλοξενούμενος διακομιστής macOS που παρέχει iMessage μέσω REST API και webhook.
+
+```toml
+[channels_config.bluebubbles]
+server_url = "http://192.168.1.100:1234"
+password   = "κωδικός-bluebubbles"
+
+allowed_senders = ["+15551234567", "user@example.com"]
+ignore_senders  = []
+webhook_secret  = "προαιρετικό-secret"
+
+# Πολιτική DM: "open" | "allowlist" | "disabled". Προεπιλογή: "open".
+dm_policy = "open"
+# Πολιτική ομάδας: "open" | "allowlist" | "disabled". Προεπιλογή: "open".
+group_policy = "open"
+# Επιτρεπόμενα chat GUIDs ομάδας όταν group_policy = "allowlist".
+group_allow_from = ["iMessage;+;chat-abc123"]
+# Αποστολή read receipt μετά από κάθε επεξεργασμένο μήνυμα. Προεπιλογή: true.
+send_read_receipts = true
+
+# Απαιτείται αναφορά σε ομάδες (προαιρετικό). Τα DM δεν επηρεάζονται.
+# require_mention_in_groups = false
+# mention_keyword = "Hey Bot"
+```
+
+Η πολιτική ομάδας λειτουργεί με τον ίδιο τρόπο χρησιμοποιώντας `group_allow_from` αντί για `allowed_senders`.
+Όταν η επαλήθευση αναφοράς είναι ενεργή, το κείμενο του μηνύματος πρέπει να περιέχει `mention_keyword` (αντιστοίχιση χωρίς διάκριση πεζών-κεφαλαίων).
+Εάν δεν βρεθεί η λέξη-κλειδί, το μήνυμα αποσύρεται αθόρυβα — χωρίς απόκριση, χωρίς σφάλμα.
+
+---
+
 ## 5. Πολιτική Ασφαλείας (Allowlist)
 
 Η πρόσβαση στο bot ελέγχεται μέσω της ρύθμισης `allowed_users`:
