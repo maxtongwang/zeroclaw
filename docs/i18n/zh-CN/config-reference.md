@@ -16,3 +16,7 @@
 
 - 配置键保持英文，避免本地化改写键名。
 - 生产行为以英文原文定义为准。
+
+## 近期更新说明
+
+- 新增 `[channels_config.bluebubbles]` — `dm_policy`、`group_policy`、`group_allow_from`、`send_read_receipts`、`require_mention_in_groups`、`mention_keyword` 等键。详见英文原文。

@@ -8,7 +8,7 @@ Source anglaise:
 
 ## Quand l'utiliser
 
-- Comparer les capacités Telegram/Discord/Slack/etc.
+- Comparer les capacités Telegram/Discord/Slack/BlueBubbles/etc.
 - Vérifier les règles allowlist et frontières de sécurité
 - Diagnostiquer les problèmes d'entrée/sortie messages
 

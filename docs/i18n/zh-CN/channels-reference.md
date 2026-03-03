@@ -8,7 +8,7 @@
 
 ## 适用场景
 
-- 了解 Telegram/Discord/Slack 等渠道能力差异
+- 了解 Telegram/Discord/Slack/BlueBubbles 等渠道能力差异
 - 确认 allowlist、安全边界与接入前置条件
 - 排查渠道消息收发问题
 
