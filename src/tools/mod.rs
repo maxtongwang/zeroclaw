@@ -652,7 +652,7 @@ pub fn all_tools_with_runtime(
                     tracing::error!("Failed to initialize BlueBubblesSendAttachmentTool: {e}")
                 }
             }
-            match BlueBubblesMessageTool::new(server_url, password) {
+            match BlueBubblesMessageTool::new(security.clone(), server_url, password) {
                 Ok(tool) => tool_arcs.push(Arc::new(tool)),
                 Err(e) => tracing::error!("Failed to initialize BlueBubblesMessageTool: {e}"),
             }
