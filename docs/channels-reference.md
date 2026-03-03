@@ -587,10 +587,12 @@ send_read_receipts = true
 # chunk_mode = "length"
 
 # --- Group mention gating (optional) ---
-# Require the bot to be explicitly @mentioned in group chats before it responds.
+# Require group messages to contain a mention keyword before the bot responds.
 # Default: false (respond to all group messages that pass the group_policy check).
+# DMs are never mention-gated.
 # require_mention_in_groups = false
-# Keyword that counts as a mention. Defaults to the first entry in allowed_senders.
+# Case-insensitive keyword match used for mention gating.
+# Defaults to the first resolvable entry in allowed_senders.
 # Required when allowed_senders is empty and require_mention_in_groups = true.
 # mention_keyword = "Hey Bot"
 
@@ -611,6 +613,9 @@ Policy behaviour:
 | `disabled`  | any               | all DMs silently dropped    |
 
 Group policy works the same way using `group_allow_from` (chat GUIDs) instead of `allowed_senders`.
+When mention gating is active for a group (global or per-group override), the message text must contain `mention_keyword` (case-insensitive substring match).
+If the keyword is not found, the message is silently dropped — no response, no error.
+DMs are never mention-gated.
 
 ### 4.21 ACP
 
@@ -702,7 +707,7 @@ rg -n "Matrix|Telegram|Discord|Slack|Mattermost|Signal|WhatsApp|Email|IRC|Lark|D
 | DingTalk                     | `DingTalk: connected and listening for messages...`                                                             | `DingTalk: ignoring message from unauthorized user:`                                                                                                                                  | `DingTalk WebSocket error:` / `DingTalk: message channel closed`                                                                    |
 | QQ                           | `QQ: connected and identified`                                                                                  | `QQ: ignoring C2C message from unauthorized user:` / `QQ: ignoring group message from unauthorized user:`                                                                             | `QQ: received Reconnect (op 7)` / `QQ: received Invalid Session (op 9)` / `QQ: message channel closed`                              |
 | Nextcloud Talk (gateway)     | `POST /nextcloud-talk — Nextcloud Talk bot webhook`                                                             | `Nextcloud Talk webhook signature verification failed` / `Nextcloud Talk: ignoring message from unauthorized actor:`                                                                  | `Nextcloud Talk send failed:` / `LLM error for Nextcloud Talk message:`                                                             |
-| BlueBubbles (gateway)        | `POST /bluebubbles — BlueBubbles iMessage webhook`                                                              | `BlueBubbles webhook auth failed (missing or invalid Bearer token)`                                                                                                                   | `BlueBubbles worker pool exhausted — dropping webhook` / `Failed to send BlueBubbles reply:` / `LLM error for BlueBubbles message:` |
+| BlueBubbles (gateway)        | `POST /bluebubbles — BlueBubbles iMessage webhook`                                                              | `BlueBubbles webhook auth failed (missing or invalid Bearer token)` / `BlueBubbles: ignoring message from unauthorized sender:`                                                       | `BlueBubbles worker pool exhausted — dropping webhook` / `Failed to send BlueBubbles reply:` / `LLM error for BlueBubbles message:` |
 | iMessage                     | `iMessage channel listening (AppleScript bridge)...`                                                            | (contact allowlist enforced by `allowed_contacts`)                                                                                                                                    | `iMessage poll error:`                                                                                                              |
 | ACP                          | `ACP channel started`                                                                                           | `ACP: ignoring message from unauthorized user:`                                                                                                                                       | `ACP process exited unexpectedly:` / `ACP JSON-RPC timeout:` / `ACP process spawn failed:`                                          |
 | Nostr                        | `Nostr channel listening as npub1...`                                                                           | `Nostr: ignoring NIP-04 message from unauthorized pubkey:` / `Nostr: ignoring NIP-17 message from unauthorized pubkey:`                                                               | `Failed to decrypt NIP-04 message:` / `Failed to unwrap NIP-17 gift wrap:` / `Nostr relay pool shut down`                           |
