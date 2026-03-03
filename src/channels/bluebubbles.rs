@@ -1463,7 +1463,9 @@ impl Channel for BlueBubblesChannel {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| anyhow::anyhow!("BlueBubbles send request failed: {}", e.without_url()))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("BlueBubbles send request failed: {}", e.without_url())
+                })?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
