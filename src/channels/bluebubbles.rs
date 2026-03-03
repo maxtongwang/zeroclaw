@@ -1625,7 +1625,8 @@ mod tests {
     #[test]
     fn bluebubbles_dm_policy_open_empty_allows_all() {
         // Open + empty allowed_senders = allow everyone (legacy behaviour)
-        let ch = BlueBubblesChannel::new("http://localhost".into(), String::new(), vec![], vec![]);
+        let ch = BlueBubblesChannel::new("http://localhost".into(), String::new(), vec![], vec![])
+            .expect("test HTTP client build");
         assert!(ch.is_dm_allowed("+1_555_000_0001"));
     }
 
@@ -1636,7 +1637,8 @@ mod tests {
             String::new(),
             vec!["+1_555_000_0001".into()],
             vec![],
-        );
+        )
+        .expect("test HTTP client build");
         assert!(ch.is_dm_allowed("+1_555_000_0001"));
         assert!(!ch.is_dm_allowed("+1_555_000_0099"));
     }
@@ -1644,6 +1646,7 @@ mod tests {
     #[test]
     fn bluebubbles_dm_policy_allowlist_empty_denies_all() {
         let ch = BlueBubblesChannel::new("http://localhost".into(), String::new(), vec![], vec![])
+            .expect("test HTTP client build")
             .with_policies(
                 BlueBubblesDmPolicy::Allowlist,
                 BlueBubblesGroupPolicy::Open,
@@ -1661,6 +1664,7 @@ mod tests {
             vec!["+1_555_000_0001".into()],
             vec![],
         )
+        .expect("test HTTP client build")
         .with_policies(
             BlueBubblesDmPolicy::Allowlist,
             BlueBubblesGroupPolicy::Open,
@@ -1679,6 +1683,7 @@ mod tests {
             vec!["*".into()],
             vec![],
         )
+        .expect("test HTTP client build")
         .with_policies(
             BlueBubblesDmPolicy::Disabled,
             BlueBubblesGroupPolicy::Open,
@@ -1690,7 +1695,8 @@ mod tests {
 
     #[test]
     fn bluebubbles_group_policy_open_allows_any() {
-        let ch = BlueBubblesChannel::new("http://localhost".into(), String::new(), vec![], vec![]);
+        let ch = BlueBubblesChannel::new("http://localhost".into(), String::new(), vec![], vec![])
+            .expect("test HTTP client build");
         // Open + empty allowed_senders: any sender, any chat
         assert!(ch.is_group_allowed("iMessage;+;chat1", "sender_a"));
         assert!(ch.is_group_allowed("iMessage;+;chat2", "sender_b"));
@@ -1703,7 +1709,8 @@ mod tests {
             String::new(),
             vec!["sender_a".into()],
             vec![],
-        );
+        )
+        .expect("test HTTP client build");
         // Open + allowed_senders set: sender filter still applies for backward-compat
         assert!(ch.is_group_allowed("iMessage;+;chat1", "sender_a"));
         assert!(!ch.is_group_allowed("iMessage;+;chat1", "sender_b"));
@@ -1712,6 +1719,7 @@ mod tests {
     #[test]
     fn bluebubbles_group_policy_disabled_denies_all() {
         let ch = BlueBubblesChannel::new("http://localhost".into(), String::new(), vec![], vec![])
+            .expect("test HTTP client build")
             .with_policies(
                 BlueBubblesDmPolicy::Open,
                 BlueBubblesGroupPolicy::Disabled,
@@ -1724,6 +1732,7 @@ mod tests {
     #[test]
     fn bluebubbles_group_policy_allowlist_filters() {
         let ch = BlueBubblesChannel::new("http://localhost".into(), String::new(), vec![], vec![])
+            .expect("test HTTP client build")
             .with_policies(
                 BlueBubblesDmPolicy::Open,
                 BlueBubblesGroupPolicy::Allowlist,
@@ -1737,6 +1746,7 @@ mod tests {
     #[test]
     fn bluebubbles_group_policy_allowlist_empty_denies_all() {
         let ch = BlueBubblesChannel::new("http://localhost".into(), String::new(), vec![], vec![])
+            .expect("test HTTP client build")
             .with_policies(
                 BlueBubblesDmPolicy::Open,
                 BlueBubblesGroupPolicy::Allowlist,
@@ -1749,6 +1759,7 @@ mod tests {
     #[test]
     fn bluebubbles_group_policy_allowlist_wildcard() {
         let ch = BlueBubblesChannel::new("http://localhost".into(), String::new(), vec![], vec![])
+            .expect("test HTTP client build")
             .with_policies(
                 BlueBubblesDmPolicy::Open,
                 BlueBubblesGroupPolicy::Allowlist,

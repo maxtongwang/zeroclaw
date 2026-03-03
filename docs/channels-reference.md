@@ -165,6 +165,11 @@ For channels with inbound sender allowlists:
 - `"*"`: allow all inbound senders (use for temporary verification only).
 - Explicit list: allow only listed senders.
 
+**BlueBubbles exception:** when `dm_policy = "open"` (the default), an empty `allowed_senders`
+allows all senders to preserve legacy behavior. Set `dm_policy = "allowlist"` to enforce
+deny-all on empty `allowed_senders` for DMs. Group chat access is controlled separately via
+`group_policy` and `group_allow_from`.
+
 Field names differ by channel:
 
 - `allowed_users` (Telegram/Discord/Slack/Mattermost/Matrix/IRC/Lark/Feishu/DingTalk/QQ/Napcat/Nextcloud Talk/ACP)
