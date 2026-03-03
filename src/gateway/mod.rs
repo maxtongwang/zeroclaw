@@ -2354,10 +2354,11 @@ async fn handle_bluebubbles_webhook(
                     .await;
             }
 
+            let session_id = gateway_message_session_id(msg);
             let _ = bb.start_typing(&msg.reply_target).await;
             let leak_guard_cfg = gateway_outbound_leak_guard_snapshot(&state_bg);
 
-            match run_gateway_chat_with_tools(&state_bg, &msg.content, None).await {
+            match run_gateway_chat_with_tools(&state_bg, &msg.content, Some(&session_id)).await {
                 Ok(response) => {
                     let _ = bb.stop_typing(&msg.reply_target).await;
                     let safe_response = sanitize_gateway_response(
