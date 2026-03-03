@@ -19,15 +19,17 @@ pub struct BlueBubblesMessageTool {
 }
 
 impl BlueBubblesMessageTool {
-    pub fn new(server_url: String, password: String) -> Self {
-        Self {
+    pub fn new(server_url: String, password: String) -> anyhow::Result<Self> {
+        Ok(Self {
             server_url: server_url.trim_end_matches('/').to_string(),
             password,
             client: reqwest::ClientBuilder::new()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
-        }
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to build BlueBubblesMessageTool HTTP client: {e}")
+                })?,
+        })
     }
 
     fn api_url(&self, path: &str) -> String {
@@ -126,14 +128,26 @@ impl Tool for BlueBubblesMessageTool {
                     "method": "private-api",
                     "selectedMessageGuid": message_id,
                 });
-                let resp = self
+                let resp = match self
                     .client
                     .post(&url)
                     .query(&[("password", &self.password)])
                     .json(&body)
                     .send()
                     .await
-                    .map_err(|e| anyhow::anyhow!("BB reply request failed: {}", e.without_url()))?;
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!(
+                                "BB reply request failed: {}",
+                                e.without_url()
+                            )),
+                        })
+                    }
+                };
                 if resp.status().is_success() {
                     Ok(ToolResult {
                         success: true,
@@ -169,14 +183,23 @@ impl Tool for BlueBubblesMessageTool {
                     "editedMessage": text,
                     "backwardsCompatibilityMessage": text,
                 });
-                let resp = self
+                let resp = match self
                     .client
                     .post(&url)
                     .query(&[("password", &self.password)])
                     .json(&body)
                     .send()
                     .await
-                    .map_err(|e| anyhow::anyhow!("BB edit request failed: {}", e.without_url()))?;
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!("BB edit request failed: {}", e.without_url())),
+                        })
+                    }
+                };
                 if resp.status().is_success() {
                     Ok(ToolResult {
                         success: true,
@@ -200,16 +223,26 @@ impl Tool for BlueBubblesMessageTool {
                 let url = self.api_url(&format!("/api/v1/message/{encoded_id}/unsend"));
                 // partIndex 0 targets the text body; multi-part unsend is not yet exposed.
                 let body = serde_json::json!({ "partIndex": 0 });
-                let resp = self
+                let resp = match self
                     .client
                     .post(&url)
                     .query(&[("password", &self.password)])
                     .json(&body)
                     .send()
                     .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("BB unsend request failed: {}", e.without_url())
-                    })?;
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!(
+                                "BB unsend request failed: {}",
+                                e.without_url()
+                            )),
+                        })
+                    }
+                };
                 if resp.status().is_success() {
                     Ok(ToolResult {
                         success: true,
