@@ -320,7 +320,7 @@ impl BlueBubblesChannel {
         {
             Err(e) => tracing::warn!("BlueBubbles mark_read failed: {}", e.without_url()),
             Ok(resp) if !resp.status().is_success() => {
-                tracing::warn!("BlueBubbles mark_read got {}", resp.status())
+                tracing::warn!("BlueBubbles mark_read got {}", resp.status());
             }
             Ok(_) => {}
         }
