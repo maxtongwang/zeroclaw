@@ -8,6 +8,7 @@
 //! - Header sanitization (handled by axum/hyper)
 
 pub mod api;
+pub mod oauth;
 mod openai_compat;
 mod openclaw_compat;
 pub mod sse;
@@ -843,6 +844,11 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/wati", post(handle_wati_webhook))
         .route("/nextcloud-talk", post(handle_nextcloud_talk_webhook))
         .route("/qq", post(handle_qq_webhook))
+        // ── OAuth browser-based connect flows ──
+        .route("/auth/status", get(oauth::handle_auth_status))
+        .route("/auth/{service}", get(oauth::handle_auth_start))
+        .route("/auth/{service}", delete(oauth::handle_auth_revoke))
+        .route("/auth/{service}/callback", get(oauth::handle_auth_callback))
         // ── OpenClaw migration: tools-enabled chat endpoint ──
         .route("/api/chat", post(openclaw_compat::handle_api_chat))
         // ── OpenAI-compatible endpoints ──

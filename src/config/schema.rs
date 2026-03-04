@@ -391,6 +391,10 @@ pub struct Config {
     /// WASM plugin engine configuration (`[wasm]` section).
     #[serde(default)]
     pub wasm: WasmConfig,
+
+    /// OAuth browser-based connect flows (`[oauth]`).
+    #[serde(default)]
+    pub oauth: OAuthConfig,
 }
 
 /// Named provider profile definition compatible with Codex app-server style config.
@@ -1092,6 +1096,25 @@ impl Default for WasmConfig {
             registry_url: default_registry_url(),
         }
     }
+}
+
+/// Google OAuth credentials for browser-based connect flows (`[oauth.google]`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct GoogleOAuthConfig {
+    /// Google OAuth client ID (from Google Cloud Console).
+    #[serde(default)]
+    pub client_id: String,
+    /// Google OAuth client secret (from Google Cloud Console).
+    #[serde(default)]
+    pub client_secret: String,
+}
+
+/// OAuth browser-based connect flows configuration (`[oauth]`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct OAuthConfig {
+    /// Google OAuth credentials for Gmail and Calendar access.
+    #[serde(default)]
+    pub google: GoogleOAuthConfig,
 }
 
 /// Multimodal (image) handling configuration (`[multimodal]` section).
@@ -6307,6 +6330,7 @@ impl Default for Config {
             mcp: McpConfig::default(),
             model_support_vision: None,
             wasm: WasmConfig::default(),
+            oauth: OAuthConfig::default(),
         }
     }
 }
@@ -9892,6 +9916,7 @@ ws_url = "ws://127.0.0.1:3002"
             mcp: McpConfig::default(),
             model_support_vision: None,
             wasm: WasmConfig::default(),
+            oauth: OAuthConfig::default(),
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -10267,6 +10292,7 @@ tool_dispatcher = "xml"
             mcp: McpConfig::default(),
             model_support_vision: None,
             wasm: WasmConfig::default(),
+            oauth: OAuthConfig::default(),
         };
 
         config.save().await.unwrap();

@@ -20,7 +20,6 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -65,23 +64,26 @@ fn oauth_dir(state: &AppState) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".zeroclaw/oauth"))
 }
 
-fn token_path(dir: &PathBuf, service: &str) -> PathBuf {
+fn token_path(dir: &std::path::Path, service: &str) -> PathBuf {
     dir.join(format!("{service}.json"))
 }
 
-fn pkce_path(dir: &PathBuf, service: &str) -> PathBuf {
+fn pkce_path(dir: &std::path::Path, service: &str) -> PathBuf {
     dir.join(format!("{service}_pkce.txt"))
 }
 
-async fn ensure_oauth_dir(dir: &PathBuf) -> anyhow::Result<()> {
+async fn ensure_oauth_dir(dir: &std::path::Path) -> anyhow::Result<()> {
     // On Unix, use DirBuilder::mode() so the directory is created with restrictive
     // permissions atomically, eliminating the create-then-chmod TOCTOU window.
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
-        let dir = dir.clone();
+        let dir = dir.to_path_buf();
         tokio::task::spawn_blocking(move || {
-            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&dir)
         })
         .await
         .map_err(|e| anyhow::anyhow!("spawn_blocking panicked creating oauth dir: {e}"))??;
@@ -104,10 +106,7 @@ async fn write_token(path: &PathBuf, token: &OAuthTokenFile) -> anyhow::Result<(
     let mut opts = tokio::fs::OpenOptions::new();
     opts.create(true).write(true).truncate(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        opts.mode(0o600);
-    }
+    opts.mode(0o600);
     let mut file = opts.open(path).await?;
     file.write_all(json.as_bytes()).await?;
     Ok(())
@@ -127,9 +126,10 @@ fn callback_url(state: &AppState, service: &str) -> String {
 }
 
 fn auth_check(state: &AppState, headers: &HeaderMap) -> bool {
-    if !state.pairing.require_pairing() {
-        return true;
-    }
+    // Always delegate to PairingGuard.is_authenticated — no early-return bypass.
+    // When pairing is disabled, is_authenticated returns true for any token,
+    // so the operator's explicit choice to run without pairing is preserved
+    // while avoiding a redundant special-case that bypasses the guard entirely.
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -223,10 +223,7 @@ async fn start_google_oauth(state: &AppState) -> Response {
         let mut opts = tokio::fs::OpenOptions::new();
         opts.create(true).write(true).truncate(true);
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            opts.mode(0o600);
-        }
+        opts.mode(0o600);
         match opts.open(&pkce_file).await {
             Ok(mut f) => {
                 if let Err(e) = f.write_all(pkce_payload.as_bytes()).await {
@@ -562,7 +559,7 @@ pub async fn handle_auth_revoke(
     }
 
     match tokio::fs::remove_file(&path).await {
-        Ok(_) => Json(json!({ "success": true, "service": service })).into_response(),
+        Ok(()) => Json(json!({ "success": true, "service": service })).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("Failed to delete token: {e}") })),
@@ -587,7 +584,7 @@ async fn revoke_google_token(access_token: &str) -> anyhow::Result<()> {
 
 /// Refresh Google access token using refresh_token, update file, return new access_token.
 pub async fn refresh_google_token(
-    dir: &PathBuf,
+    dir: &std::path::Path,
     client_id: &str,
     client_secret: &str,
 ) -> anyhow::Result<String> {
@@ -640,7 +637,7 @@ pub async fn refresh_google_token(
 
 /// Get a valid Google access token, refreshing if needed. Returns error if not connected.
 pub async fn get_google_token(
-    oauth_dir: &PathBuf,
+    oauth_dir: &std::path::Path,
     client_id: &str,
     client_secret: &str,
 ) -> anyhow::Result<String> {
