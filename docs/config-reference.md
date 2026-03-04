@@ -1263,6 +1263,7 @@ Notes:
 - Group chat GUIDs contain `;+;`; DM GUIDs contain `;-;`.
 - `chunk_mode = "newline"` is self-sufficient without `text_chunk_limit`.
 - `text_chunk_limit = 0` is rejected at startup with a clear error.
+- If `require_mention_in_groups = true` but no `mention_keyword` is set and `allowed_senders` is empty, startup logs a warning: `[WARN] No mention keyword resolvable for group gating — set mention_keyword or allowed_senders explicitly`. Set either field to suppress.
 - See [channels-reference.md §4.20](channels-reference.md#420-bluebubbles-imessage-via-bluebubbles-server) for policy behaviour table.
 
 ### `[channels_config.nextcloud_talk]`
