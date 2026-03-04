@@ -89,7 +89,11 @@ async fn transcribe_with_whisper_cpp(
         ffmpeg_cmd.kill_on_drop(true);
         let conv = tokio::time::timeout(std::time::Duration::from_secs(120), ffmpeg_cmd.output())
             .await
-            .map_err(|_| anyhow::anyhow!("ffmpeg CAF→WAV conversion timed out after 120s"))?
+            .map_err(|_| {
+                // Timeout: kill_on_drop terminated ffmpeg; clean up the partial output.
+                let _ = std::fs::remove_file(&tmp);
+                anyhow::anyhow!("ffmpeg CAF→WAV conversion timed out after 120s")
+            })?
             .context("ffmpeg CAF→WAV conversion failed")?;
         if !conv.status.success() {
             // Clean up any partial output file before propagating the error.
