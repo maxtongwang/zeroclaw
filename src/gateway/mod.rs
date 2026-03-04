@@ -2426,6 +2426,12 @@ async fn handle_bluebubbles_webhook(
                 }
             }
         }
+        // Clear the pre-transcription typing indicator started before the message
+        // loop. When msg.reply_target differs from typing_target the per-message
+        // stop_typing calls won't cover the original GUID.
+        if let Some(ref guid) = typing_target {
+            let _ = bb.stop_typing(guid).await;
+        }
     });
 
     (
