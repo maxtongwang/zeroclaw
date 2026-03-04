@@ -279,7 +279,7 @@ impl BlueBubblesChannel {
     /// Extract the chat GUID from multiple possible locations in the `data`
     /// object. Preference order matches OpenClaw: direct fields, nested chat,
     /// then chats array.
-    fn extract_chat_guid(data: &serde_json::Value) -> Option<String> {
+    pub(crate) fn extract_chat_guid(data: &serde_json::Value) -> Option<String> {
         // Direct fields
         for key in &["chatGuid", "chat_guid"] {
             if let Some(g) = data.get(key).and_then(|v| v.as_str()) {
@@ -624,12 +624,6 @@ impl BlueBubblesChannel {
         };
         if self.is_sender_ignored(&sender) || !self.is_sender_allowed(&sender) {
             return self.parse_webhook_payload(payload);
-        }
-
-        // Start typing indicator before whisper runs — transcription can take >30 s
-        // and without this the user sees no feedback during the slow CPU phase.
-        if let Some(chat_guid) = Self::extract_chat_guid(data) {
-            let _ = self.start_typing(&chat_guid).await;
         }
 
         match self.transcribe_local(&att).await {

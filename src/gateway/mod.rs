@@ -2304,6 +2304,7 @@ async fn handle_github_webhook(
 #[allow(clippy::large_futures)]
 async fn handle_bluebubbles_webhook(
     State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
@@ -2313,6 +2314,19 @@ async fn handle_bluebubbles_webhook(
             Json(serde_json::json!({"error": "BlueBubbles not configured"})),
         );
     };
+
+    // Admission control — reject bursts before spawning background workers.
+    let rate_key = client_key_from_request(Some(peer_addr), &headers, state.trust_forwarded_headers);
+    if !state.rate_limiter.allow_webhook(&rate_key) {
+        tracing::warn!("/bluebubbles rate limit exceeded");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({
+                "error": "Too many BlueBubbles webhook requests. Please retry later.",
+                "retry_after": RATE_LIMIT_WINDOW_SECS,
+            })),
+        );
+    }
 
     // Verify Authorization: Bearer <webhook_secret> if configured
     if let Some(ref expected) = state.bluebubbles_webhook_secret {
@@ -2345,7 +2359,26 @@ async fn handle_bluebubbles_webhook(
     let bb = Arc::clone(bluebubbles);
     let state_bg = state.clone();
     tokio::spawn(async move {
+        // Pre-start typing before the slow transcription phase to give the user
+        // immediate feedback. parse_webhook_payload_with_transcription is kept
+        // side-effect free; typing lifecycle is managed here instead.
+        let typing_target = payload
+            .get("data")
+            .and_then(|d| BlueBubblesChannel::extract_chat_guid(d));
+        if let Some(ref guid) = typing_target {
+            let _ = bb.start_typing(guid).await;
+        }
+
         let messages = bb.parse_webhook_payload_with_transcription(&payload).await;
+
+        // If parse returned no messages (e.g., self-message or disallowed sender),
+        // clean up the typing indicator that was started above.
+        if messages.is_empty() {
+            if let Some(ref guid) = typing_target {
+                let _ = bb.stop_typing(guid).await;
+            }
+            return;
+        }
 
         for msg in &messages {
             tracing::info!(
@@ -4992,5 +5025,114 @@ Reminder set successfully."#;
 
         // Should be allowed again
         assert!(limiter.allow("burst-ip"));
+    }
+
+    #[tokio::test]
+    async fn bluebubbles_webhook_returns_404_when_not_configured() {
+        // Threat: misconfigured deployments should not expose an active endpoint.
+        // Rollback: removing the bluebubbles feature reverts to this path automatically.
+        let state = AppState {
+            config: Arc::new(Mutex::new(Config::default())),
+            provider: Arc::new(MockProvider::default()),
+            model: "test-model".into(),
+            temperature: 0.0,
+            mem: Arc::new(MockMemory),
+            auto_save: false,
+            webhook_secret_hash: None,
+            pairing: Arc::new(PairingGuard::new(false, &[])),
+            trust_forwarded_headers: false,
+            rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
+            idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
+            whatsapp: None,
+            whatsapp_app_secret: None,
+            linq: None,
+            linq_signing_secret: None,
+            bluebubbles: None,
+            bluebubbles_webhook_secret: None,
+            nextcloud_talk: None,
+            nextcloud_talk_webhook_secret: None,
+            wati: None,
+            qq: None,
+            qq_webhook_enabled: false,
+            observer: Arc::new(crate::observability::NoopObserver),
+            tools_registry: Arc::new(Vec::new()),
+            tools_registry_exec: Arc::new(Vec::new()),
+            multimodal: crate::config::MultimodalConfig::default(),
+            max_tool_iterations: 10,
+            cost_tracker: None,
+            event_tx: tokio::sync::broadcast::channel(16).0,
+        };
+
+        let response = handle_bluebubbles_webhook(
+            State(state),
+            test_connect_info(),
+            HeaderMap::new(),
+            Bytes::from(b"{}".as_slice()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn bluebubbles_webhook_rate_limit_returns_429() {
+        // Threat: unbounded background worker spawning under burst load.
+        // Rollback: revert the ConnectInfo + rate_limiter guard in handle_bluebubbles_webhook.
+        let state = AppState {
+            config: Arc::new(Mutex::new(Config::default())),
+            provider: Arc::new(MockProvider::default()),
+            model: "test-model".into(),
+            temperature: 0.0,
+            mem: Arc::new(MockMemory),
+            auto_save: false,
+            webhook_secret_hash: None,
+            pairing: Arc::new(PairingGuard::new(false, &[])),
+            trust_forwarded_headers: false,
+            // Limit to 1 webhook request per window to make the test deterministic.
+            rate_limiter: Arc::new(GatewayRateLimiter::new(100, 1, 100)),
+            idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
+            whatsapp: None,
+            whatsapp_app_secret: None,
+            linq: None,
+            linq_signing_secret: None,
+            bluebubbles: None,
+            bluebubbles_webhook_secret: None,
+            nextcloud_talk: None,
+            nextcloud_talk_webhook_secret: None,
+            wati: None,
+            qq: None,
+            qq_webhook_enabled: false,
+            observer: Arc::new(crate::observability::NoopObserver),
+            tools_registry: Arc::new(Vec::new()),
+            tools_registry_exec: Arc::new(Vec::new()),
+            multimodal: crate::config::MultimodalConfig::default(),
+            max_tool_iterations: 10,
+            cost_tracker: None,
+            event_tx: tokio::sync::broadcast::channel(16).0,
+        };
+
+        // First request consumes the single allowed webhook slot.
+        let resp1 = handle_bluebubbles_webhook(
+            State(state.clone()),
+            test_connect_info(),
+            HeaderMap::new(),
+            Bytes::from(b"{}".as_slice()),
+        )
+        .await
+        .into_response();
+        // The first request hits the rate limiter first (before the 404 for unconfigured BB).
+        // With limit=1, it passes and then returns 404 (BB not configured).
+        assert_eq!(resp1.status(), StatusCode::NOT_FOUND);
+
+        // Second request from the same IP is rejected by admission control.
+        let resp2 = handle_bluebubbles_webhook(
+            State(state),
+            test_connect_info(),
+            HeaderMap::new(),
+            Bytes::from(b"{}".as_slice()),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp2.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 }

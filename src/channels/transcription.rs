@@ -99,6 +99,12 @@ async fn transcribe_with_whisper_cpp(
                 conv.status.code().unwrap_or(-1)
             );
         }
+        // Restrict the WAV file to owner-only to protect audio content.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
+        }
         (tmp.clone(), Some(tmp))
     };
 
@@ -222,6 +228,12 @@ async fn transcribe_with_python_whisper(file_path: &str) -> anyhow::Result<Strin
     tokio::fs::create_dir_all(&tmp_dir)
         .await
         .context("Failed to create whisper temp dir")?;
+    // Restrict to owner-only to protect audio content from other processes.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o700)).await;
+    }
 
     let tmp_dir_str = match tmp_dir.to_str() {
         Some(s) => s,

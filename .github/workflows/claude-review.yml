@@ -26,18 +26,22 @@ jobs:
       issues: write
       actions: read
     steps:
-      # For issue_comment events, checkout the PR head (not default branch)
-      - name: Resolve PR head ref
+      # For issue_comment events, checkout the PR head (not default branch).
+      # Also resolve the head repository so forked PRs are checked out correctly.
+      - name: Resolve PR head repo/ref
         id: pr-ref
         if: github.event_name == 'issue_comment' && github.event.issue.pull_request != null
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          pr_head=$(gh pr view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json headRefName -q '.headRefName')
-          echo "ref=$pr_head" >> "$GITHUB_OUTPUT"
+          pr_ref=$(gh pr view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json headRefName -q '.headRefName')
+          pr_repo=$(gh pr view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json headRepository -q '.headRepository.nameWithOwner')
+          echo "ref=$pr_ref" >> "$GITHUB_OUTPUT"
+          echo "repo=$pr_repo" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          repository: ${{ steps.pr-ref.outputs.repo || github.repository }}
           ref: ${{ steps.pr-ref.outputs.ref || github.ref }}
           fetch-depth: 1
 
