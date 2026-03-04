@@ -358,6 +358,42 @@ Ghi chú:
 allowed_contacts = ["*"]
 ```
 
+### 4.15 BlueBubbles (iMessage qua máy chủ BlueBubbles)
+
+[BlueBubbles](https://bluebubbles.app) là máy chủ macOS tự lưu trữ cho phép iMessage qua REST API và webhook.
+
+```toml
+[channels_config.bluebubbles]
+server_url = "http://192.168.1.100:1234"  # hoặc URL ngrok
+password   = "mật-khẩu-bb"
+
+# Allowlist người gửi (số điện thoại hoặc Apple ID). Mặc định: cho phép tất cả.
+allowed_senders = ["+15551234567", "user@example.com"]
+# Bí mật chia sẻ để xác thực webhook đầu vào (Authorization: Bearer <secret>).
+webhook_secret  = "bí-mật-tùy-chọn"
+
+# Chính sách DM: "open" | "allowlist" | "disabled". Mặc định: "open".
+dm_policy = "open"
+# Chính sách nhóm: "open" | "allowlist" | "disabled". Mặc định: "open".
+group_policy = "open"
+# Chat GUID nhóm được phép khi group_policy = "allowlist". Dùng ["*"] cho tất cả.
+group_allow_from = ["iMessage;+;chat-abc123"]
+# Gửi read receipt đến BB sau mỗi tin nhắn đã xử lý. Mặc định: true.
+send_read_receipts = true
+```
+
+Hành vi chính sách:
+
+| `dm_policy` | `allowed_senders` | Kết quả                           |
+| ----------- | ----------------- | --------------------------------- |
+| `open`      | rỗng              | cho phép tất cả DM                |
+| `open`      | không rỗng        | chỉ cho phép người gửi đã liệt kê |
+| `allowlist` | rỗng              | từ chối tất cả DM                 |
+| `allowlist` | không rỗng        | chỉ cho phép người gửi đã liệt kê |
+| `disabled`  | bất kỳ            | bỏ qua tất cả DM (không phản hồi) |
+
+Chính sách nhóm hoạt động tương tự bằng cách sử dụng `group_allow_from` (chat GUID) thay cho `allowed_senders`.
+
 ---
 
 ## 5. Quy trình xác thực
