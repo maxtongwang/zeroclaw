@@ -5074,4 +5074,123 @@ Reminder set successfully."#;
         // Should be allowed again
         assert!(limiter.allow("burst-ip"));
     }
+
+    // ══════════════════════════════════════════════════════════
+    // BlueBubbles Worker Pool (Semaphore) Tests
+    // ══════════════════════════════════════════════════════════
+
+    // Serialise the two semaphore tests so they don't interfere with each other.
+    // Both tests manipulate the process-wide BB_WORKER_SEMAPHORE static; holding
+    // this lock ensures only one test drains/exercises the pool at a time.
+    static BB_SEMAPHORE_TEST_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
+    fn make_bb_app_state(bb: Arc<BlueBubblesChannel>) -> AppState {
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider::default());
+        let memory: Arc<dyn Memory> = Arc::new(MockMemory);
+        AppState {
+            config: Arc::new(Mutex::new(Config::default())),
+            provider,
+            model: "test-model".into(),
+            temperature: 0.0,
+            mem: memory,
+            auto_save: false,
+            webhook_secret_hash: None,
+            pairing: Arc::new(PairingGuard::new(false, &[])),
+            trust_forwarded_headers: false,
+            rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
+            idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
+            whatsapp: None,
+            whatsapp_app_secret: None,
+            linq: None,
+            linq_signing_secret: None,
+            bluebubbles: Some(bb),
+            bluebubbles_webhook_secret: None,
+            nextcloud_talk: None,
+            nextcloud_talk_webhook_secret: None,
+            wati: None,
+            qq: None,
+            qq_webhook_enabled: false,
+            observer: Arc::new(crate::observability::NoopObserver),
+            tools_registry: Arc::new(Vec::new()),
+            tools_registry_exec: Arc::new(Vec::new()),
+            multimodal: crate::config::MultimodalConfig::default(),
+            max_tool_iterations: 10,
+            cost_tracker: None,
+            event_tx: tokio::sync::broadcast::channel(16).0,
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn bluebubbles_webhook_pool_exhausted_returns_503() {
+        // Acquire the serialisation lock before touching the shared semaphore.
+        // The guard is intentionally held across the await — holding it for the
+        // full test prevents the 202 test from racing on BB_WORKER_SEMAPHORE.
+        let guard = BB_SEMAPHORE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let bb = Arc::new(
+            BlueBubblesChannel::new(
+                "http://127.0.0.1:1".to_string(),
+                "secret".to_string(),
+                vec![],
+                vec![],
+            )
+            .expect("valid BB args"),
+        );
+        let state = make_bb_app_state(bb);
+
+        // Drain all available concurrency slots so the next try_acquire_owned fails.
+        // Uses a while-let loop rather than an exact count because the 202 test's
+        // background task may still hold a permit when this test runs; draining
+        // whatever is available is sufficient to exhaust the pool regardless.
+        let mut permits = Vec::new();
+        while let Ok(p) = Arc::clone(&*BB_WORKER_SEMAPHORE).try_acquire_owned() {
+            permits.push(p);
+        }
+
+        let body = Bytes::from_static(br#"{"type":"new-message","data":{"text":"hi"}}"#);
+        let response = handle_bluebubbles_webhook(State(state), HeaderMap::new(), body)
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        drop(permits); // return all acquired permits to the semaphore
+        drop(guard);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn bluebubbles_webhook_accepted_returns_202() {
+        // Acquire the serialisation lock so this test doesn't race with the
+        // pool-exhaustion test that drains all semaphore permits.
+        // The guard is intentionally held across the await — see note above.
+        let guard = BB_SEMAPHORE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let bb = Arc::new(
+            BlueBubblesChannel::new(
+                "http://127.0.0.1:1".to_string(),
+                "secret".to_string(),
+                vec![],
+                vec![],
+            )
+            .expect("valid BB args"),
+        );
+        let state = make_bb_app_state(bb);
+
+        let body = Bytes::from_static(br#"{"type":"new-message","data":{"text":"hi"}}"#);
+        let response = handle_bluebubbles_webhook(State(state), HeaderMap::new(), body)
+            .await
+            .into_response();
+
+        // Handler acquires a slot, spawns the background task, and immediately
+        // returns 202.  The background task exits quickly (no valid chat GUID →
+        // fail-closed parse) releasing the permit.
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        drop(guard);
+    }
 }

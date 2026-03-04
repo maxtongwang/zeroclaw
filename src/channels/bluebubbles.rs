@@ -894,9 +894,11 @@ impl BlueBubblesChannel {
             return vec![];
         }
 
-        let reply_target = Self::extract_chat_guid(data)
-            .filter(|g| !g.is_empty())
-            .unwrap_or_else(|| sender.clone());
+        // Fail closed when the chat GUID is absent — we cannot determine whether
+        // this is a group or DM tapback, so deny rather than risk applying the wrong policy.
+        let Some(reply_target) = Self::extract_chat_guid(data).filter(|g| !g.is_empty()) else {
+            return vec![];
+        };
 
         // Apply DM vs group policy to tapbacks.
         let allowed = if Self::is_group_chat(&reply_target) {
@@ -1012,11 +1014,11 @@ impl BlueBubblesChannel {
             return messages;
         }
 
-        // Use chat GUID as reply_target — ensures replies go to the correct
-        // conversation (important for group chats). Falls back to sender address.
-        let reply_target = Self::extract_chat_guid(data)
-            .filter(|g| !g.is_empty())
-            .unwrap_or_else(|| sender.clone());
+        // Fail closed when the chat GUID is absent — we cannot determine whether
+        // this is a group or DM, so deny rather than risk applying the wrong policy.
+        let Some(reply_target) = Self::extract_chat_guid(data).filter(|g| !g.is_empty()) else {
+            return messages;
+        };
 
         // Apply DM vs group policy gate.
         if Self::is_group_chat(&reply_target) {
@@ -2048,7 +2050,9 @@ mod tests {
     }
 
     #[test]
-    fn bluebubbles_parse_fallback_reply_target_when_no_chats() {
+    fn bluebubbles_parse_missing_guid_returns_no_messages() {
+        // When the chat GUID is absent we cannot determine DM vs group policy,
+        // so the message is denied (fail closed) rather than silently mis-classified.
         let ch = make_open_channel();
         let payload = serde_json::json!({
             "type": "new-message",
@@ -2064,8 +2068,10 @@ mod tests {
         });
 
         let msgs = ch.parse_webhook_payload(&payload);
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].reply_target, "+1_234_567_890");
+        assert!(
+            msgs.is_empty(),
+            "messages without a chat GUID must be denied"
+        );
     }
 
     #[test]
