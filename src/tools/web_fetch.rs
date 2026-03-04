@@ -865,4 +865,144 @@ mod tests {
         assert_eq!(tool.get_next_api_key().as_deref(), Some("k2"));
         assert_eq!(tool.get_next_api_key().as_deref(), Some("k1"));
     }
+
+    /// Build a test tool that allows loopback addresses so mock local servers can be used.
+    fn test_tool_loopback() -> WebFetchTool {
+        let security = Arc::new(SecurityPolicy {
+            autonomy: AutonomyLevel::Supervised,
+            ..SecurityPolicy::default()
+        });
+        WebFetchTool::new(
+            security,
+            "fast_html2md".to_string(),
+            None,
+            None,
+            vec!["127.0.0.1".to_string()],
+            vec![],
+            UrlAccessConfig {
+                allow_loopback: true,
+                ..UrlAccessConfig::default()
+            },
+            500_000,
+            5, // short timeout for tests
+            "ZeroClaw/1.0".to_string(),
+        )
+    }
+
+    /// Spin up a minimal TCP mock server that accepts one connection and writes
+    /// a fixed HTTP/1.1 response. Returns the bound port.
+    async fn spawn_mock_server(response: &'static [u8]) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                // Drain the request headers before replying so the client doesn't
+                // see a connection reset.
+                let mut buf = [0u8; 4096];
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    stream.read(&mut buf),
+                )
+                .await;
+                let _ = stream.write_all(response).await;
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn redirect_missing_location_header_returns_error() {
+        // Threat: if the redirect Location is absent the code must error rather
+        // than silently proceeding or fetching an empty URL.
+        let port = spawn_mock_server(
+            b"HTTP/1.1 301 Moved Permanently\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+
+        let tool = test_tool_loopback();
+        let result = tool
+            .fetch_with_http_provider(&format!("http://127.0.0.1:{port}/test"))
+            .await;
+
+        assert!(result.is_err(), "expected error for missing Location header");
+        assert!(
+            result.unwrap_err().to_string().contains("Location"),
+            "error should mention Location header"
+        );
+    }
+
+    #[tokio::test]
+    async fn redirect_to_blocked_private_target_is_rejected() {
+        // Threat: a redirect to a private IP could be used to exfiltrate data
+        // from internal services (SSRF via redirect). validate_url must block it.
+        let port = spawn_mock_server(
+            b"HTTP/1.1 301 Moved Permanently\r\nLocation: http://10.0.0.1/internal\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+
+        let tool = test_tool_loopback();
+        let result = tool
+            .fetch_with_http_provider(&format!("http://127.0.0.1:{port}/test"))
+            .await;
+
+        assert!(result.is_err(), "expected error for SSRF redirect");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("local/private") || err.contains("blocked") || err.contains("SSRF"),
+            "error should mention SSRF/private block, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn redirect_one_hop_only_second_redirect_not_followed() {
+        // Threat: following unlimited redirect chains enables SSRF bypass via
+        // redirect chains. The code must stop after one hop.
+        // Server B returns a second redirect — the code must NOT follow it.
+        let port_b = spawn_mock_server(
+            b"HTTP/1.1 302 Found\r\nLocation: http://example.com/final\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+
+        // Server A redirects to server B.
+        let response_a = format!(
+            "HTTP/1.1 301 Moved Permanently\r\nLocation: http://127.0.0.1:{port_b}/step2\r\nContent-Length: 0\r\n\r\n"
+        );
+        let port_a = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 4096];
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(200),
+                        stream.read(&mut buf),
+                    )
+                    .await;
+                    let _ = stream.write_all(response_a.as_bytes()).await;
+                }
+            });
+            port
+        };
+
+        let tool = test_tool_loopback();
+        let result = tool
+            .fetch_with_http_provider(&format!("http://127.0.0.1:{port_a}/step1"))
+            .await;
+
+        // After one hop (301→server B), gets 302 which is not success.
+        // Code does NOT follow further — returns HTTP status error.
+        assert!(result.is_err(), "expected error after one-hop redirect hits another redirect");
+        let err = result.unwrap_err().to_string();
+        // Should NOT be an SSRF or Location error — the failure is the 302 status code.
+        assert!(
+            !err.contains("Location") && !err.contains("local/private"),
+            "unexpected error type (should be HTTP 302, not SSRF/Location): {err}"
+        );
+        assert!(
+            err.contains("302") || err.contains("HTTP"),
+            "error should reference the 302 status: {err}"
+        );
+    }
 }
