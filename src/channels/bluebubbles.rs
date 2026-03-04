@@ -672,11 +672,15 @@ impl BlueBubblesChannel {
             let tmp_path =
                 std::env::temp_dir().join(format!("zc_bb_audio_{}.{ext}", uuid::Uuid::new_v4()));
             tokio::fs::write(&tmp_path, &bytes).await?;
-            let result =
-                super::transcription::transcribe_audio_local(tmp_path.to_str().ok_or_else(
-                    || anyhow::anyhow!("Temp audio path contains non-UTF-8 characters"),
-                )?)
-                .await;
+            let tmp_str = match tmp_path.to_str() {
+                Some(s) => s,
+                None => {
+                    // Clean up before propagating — the file was already written.
+                    tokio::fs::remove_file(&tmp_path).await.ok();
+                    anyhow::bail!("Temp audio path contains non-UTF-8 characters");
+                }
+            };
+            let result = super::transcription::transcribe_audio_local(tmp_str).await;
             // Clean up temp file regardless of result.
             tokio::fs::remove_file(&tmp_path).await.ok();
             let transcript = result?;
@@ -755,9 +759,13 @@ impl BlueBubblesChannel {
         let Some(sender) = Self::extract_sender(data) else {
             return self.parse_webhook_payload(payload);
         };
-        let chat_guid_for_policy = Self::extract_chat_guid(data)
-            .filter(|g| !g.is_empty())
-            .unwrap_or_default();
+        // Fail closed when the chat GUID is absent or empty — we cannot
+        // determine whether this is a group or DM, so deny rather than
+        // risk applying the wrong policy.
+        let Some(chat_guid_for_policy) = Self::extract_chat_guid(data).filter(|g| !g.is_empty())
+        else {
+            return vec![];
+        };
         let allowed = if Self::is_group_chat(&chat_guid_for_policy) {
             self.is_group_allowed(&chat_guid_for_policy, &sender)
         } else {
