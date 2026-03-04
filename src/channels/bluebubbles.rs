@@ -470,7 +470,15 @@ impl BlueBubblesChannel {
         if !self.send_read_receipts {
             return;
         }
-        let encoded = urlencoding::encode(chat_guid).into_owned();
+        // BB's `/read` path lookup requires an explicit service prefix.  When the
+        // webhook payload reports a group as "any;+;…" (service unknown), normalise
+        // it to "iMessage;+;…" so the Private API can send the actual receipt.
+        let normalised: std::borrow::Cow<str> = if chat_guid.starts_with("any;") {
+            std::borrow::Cow::Owned(chat_guid.replacen("any;", "iMessage;", 1))
+        } else {
+            std::borrow::Cow::Borrowed(chat_guid)
+        };
+        let encoded = urlencoding::encode(normalised.as_ref()).into_owned();
         let url = self.api_url(&format!("/api/v1/chat/{encoded}/read"));
         match self
             .client
@@ -480,10 +488,19 @@ impl BlueBubblesChannel {
             .await
         {
             Err(e) => tracing::warn!("BlueBubbles mark_read failed: {}", e.without_url()),
-            Ok(resp) if !resp.status().is_success() => {
-                tracing::warn!("BlueBubbles mark_read got {}", resp.status());
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                if status.is_success() {
+                    tracing::info!(
+                        "BlueBubbles mark_read ok guid={normalised} status={status} body={body}"
+                    );
+                } else {
+                    tracing::warn!(
+                        "BlueBubbles mark_read got {status} guid={chat_guid} body={body}"
+                    );
+                }
             }
-            Ok(_) => {}
         }
     }
 
