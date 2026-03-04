@@ -604,9 +604,10 @@ impl BlueBubblesChannel {
     /// Uses `GET /api/v1/attachment/{guid}/download`. The attachment GUID is
     /// URL-encoded so `p:0/UUID`-style identifiers work as URL path segments.
     ///
-    /// Enforces a 25 MB cap (matching the Groq Whisper API limit) both via the
-    /// `Content-Length` header (before buffering) and on the buffered body, to
-    /// prevent memory exhaustion from large or malicious attachments.
+    /// Enforces a 25 MB cap (matching the Groq Whisper API limit) via the
+    /// `Content-Length` header (before streaming) and by accumulating chunks
+    /// and bailing as soon as the running total exceeds the limit, preventing
+    /// memory exhaustion even when the server omits `Content-Length`.
     async fn download_attachment_bytes(&self, attachment_guid: &str) -> anyhow::Result<Vec<u8>> {
         /// 25 MB — matches `transcription::MAX_AUDIO_BYTES`.
         const MAX_BYTES: usize = 25 * 1024 * 1024;
@@ -631,17 +632,21 @@ impl BlueBubblesChannel {
                 anyhow::bail!("BB attachment too large ({len} bytes, max {MAX_BYTES})");
             }
         }
-        let bytes = resp
-            .bytes()
+        // Stream in chunks so the size cap is enforced before the full body
+        // is buffered in memory (guards against servers that omit Content-Length).
+        let mut resp = resp;
+        let mut buf = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
             .await
-            .map_err(|e| anyhow::anyhow!("BB attachment body read failed: {}", e.without_url()))?;
-        if bytes.len() > MAX_BYTES {
-            anyhow::bail!(
-                "BB attachment too large ({} bytes, max {MAX_BYTES})",
-                bytes.len()
-            );
+            .map_err(|e| anyhow::anyhow!("BB attachment body read failed: {}", e.without_url()))?
+        {
+            buf.extend_from_slice(&chunk);
+            if buf.len() > MAX_BYTES {
+                anyhow::bail!("BB attachment too large (>{MAX_BYTES} bytes)");
+            }
         }
-        Ok(bytes.to_vec())
+        Ok(buf)
     }
 
     /// Transcribe an audio attachment received via the BlueBubbles webhook.
