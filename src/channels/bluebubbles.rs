@@ -177,14 +177,11 @@ impl BlueBubblesChannel {
         })
     }
 
-    /// Configure voice transcription via Groq Whisper.
-    ///
-    /// When `config.enabled` is false the builder is a no-op so callers can
-    /// pass `config.transcription.clone()` unconditionally.
+    /// Configure voice transcription. Always stores the config so that
+    /// `config.enabled = false` can prevent local whisper fallback as well as
+    /// the Groq API path.
     pub fn with_transcription(mut self, config: crate::config::TranscriptionConfig) -> Self {
-        if config.enabled {
-            self.transcription = Some(config);
-        }
+        self.transcription = Some(config);
         self
     }
 
@@ -557,13 +554,20 @@ impl BlueBubblesChannel {
                 let mut f = tokio::fs::File::create(&tmp_path)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to create temp audio file: {e}"))?;
-                f.write_all(&bytes).await?;
+                if let Err(e) = f.write_all(&bytes).await {
+                    // File was created; remove it before propagating the write error.
+                    tokio::fs::remove_file(&tmp_path).await.ok();
+                    return Err(anyhow::anyhow!("Failed to write temp audio file: {e}"));
+                }
             }
-            let result =
-                super::transcription::transcribe_audio_local(tmp_path.to_str().ok_or_else(
-                    || anyhow::anyhow!("Temp audio path contains non-UTF-8 characters"),
-                )?)
-                .await;
+            let tmp_str = match tmp_path.to_str() {
+                Some(s) => s,
+                None => {
+                    tokio::fs::remove_file(&tmp_path).await.ok();
+                    anyhow::bail!("Temp audio path contains non-UTF-8 characters");
+                }
+            };
+            let result = super::transcription::transcribe_audio_local(tmp_str).await;
             // Clean up temp file regardless of result.
             tokio::fs::remove_file(&tmp_path).await.ok();
             let transcript = result?;
@@ -610,9 +614,14 @@ impl BlueBubblesChannel {
         &self,
         payload: &serde_json::Value,
     ) -> Vec<ChannelMessage> {
-        // Local whisper needs no config — allow transcription whenever
-        // whisper-cli is installed, even if [transcription] is not configured.
-        if self.transcription.is_none() && !super::transcription::whisper_available() {
+        // Skip transcription if:
+        // - transcription is explicitly disabled (config stored but enabled = false), OR
+        // - no [transcription] config and whisper-cli is not installed.
+        let transcription_active = match &self.transcription {
+            Some(cfg) => cfg.enabled,
+            None => super::transcription::whisper_available(),
+        };
+        if !transcription_active {
             return self.parse_webhook_payload(payload);
         }
 
