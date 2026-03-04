@@ -2359,6 +2359,8 @@ async fn handle_bluebubbles_webhook(
     //
     // Transcription (especially the Python whisper fallback) can take 30-90 s,
     // which exceeds the global gateway timeout.  Returning 202 before the
+    // background task completes keeps the HTTP lifecycle within the timeout budget.
+    //
     // Acquire a concurrency slot before spawning.  Reject immediately if the
     // pool is exhausted rather than queuing unbounded work.
     let permit = match Arc::clone(&*BB_WORKER_SEMAPHORE).try_acquire_owned() {
