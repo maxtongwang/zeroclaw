@@ -11,6 +11,7 @@ Với các phòng Matrix được mã hóa, xem hướng dẫn chuyên biệt:
 - Cần tham khảo config đầy đủ theo từng channel: xem mục `## 4. Ví dụ cấu hình theo từng channel`.
 - Cần chẩn đoán khi không nhận được phản hồi: xem mục `## 6. Danh sách kiểm tra xử lý sự cố`.
 - Cần hỗ trợ phòng Matrix được mã hóa: dùng [Hướng dẫn Matrix E2EE](matrix-e2ee-guide.md).
+- Cần thiết lập bot Nextcloud Talk: dùng [Thiết lập Nextcloud Talk](nextcloud-talk-setup.md).
 - Cần thông tin triển khai/mạng (polling vs webhook): dùng [Network Deployment](network-deployment.md).
 
 ## FAQ: Cấu hình Matrix thành công nhưng không có phản hồi

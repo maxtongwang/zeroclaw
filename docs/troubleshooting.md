@@ -182,6 +182,33 @@ Fix:
 - keep only one active runtime for that token
 - stop extra `zeroclaw daemon` / `zeroclaw channel start` processes
 
+### BlueBubbles: webhook not receiving messages
+
+Symptom: BlueBubbles is configured but ZeroClaw receives no inbound messages.
+
+Diagnosis:
+
+```bash
+zeroclaw channel doctor
+```
+
+Common causes and fixes:
+
+| Symptom                                | Likely cause                                     | Fix                                                              |
+| -------------------------------------- | ------------------------------------------------ | ---------------------------------------------------------------- |
+| `BlueBubbles` shows unhealthy          | Wrong `server_url` or `password`                 | Verify URL is reachable and password matches BB server           |
+| No webhook events arrive               | Webhook not registered in BlueBubbles UI         | Add `POST <host>/bluebubbles` as a webhook in BB server settings |
+| Signature verification failure in logs | `webhook_secret` mismatch                        | Copy the exact secret from BlueBubbles server UI into config     |
+| Events arrive but no reply             | `dm_policy` or `group_policy` denying the sender | Check policy settings and `allowed_senders` / `group_allow_from` |
+
+Network check — verify the ZeroClaw gateway is reachable from the BlueBubbles host:
+
+```bash
+curl -v http://<zeroclaw-host>:<port>/bluebubbles -X POST -d '{}' -H 'Content-Type: application/json'
+```
+
+Expected: `400` or `401` (not a connection error).
+
 ### Channel unhealthy in `channel doctor`
 
 Checks:
@@ -208,8 +235,8 @@ Why this happens:
 Preferred fix:
 
 - use purpose-built tools instead of shell fetch:
-  - `http_request` for direct API/HTTP calls
-  - `web_fetch` for page content extraction/summarization
+    - `http_request` for direct API/HTTP calls
+    - `web_fetch` for page content extraction/summarization
 
 Minimal config:
 
