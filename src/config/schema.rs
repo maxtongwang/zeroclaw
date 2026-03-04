@@ -7673,6 +7673,19 @@ impl Config {
                         "channels_config.bluebubbles.text_chunk_limit must be > 0 (use `chunk_mode` without a limit for newline splitting)"
                     );
                 }
+                // text_chunk_limit is only meaningful with chunk_mode = "length".
+                if bb.chunk_mode != Some(BlueBubblesChunkMode::Length) {
+                    anyhow::bail!(
+                        "channels_config.bluebubbles.text_chunk_limit requires chunk_mode = \"length\""
+                    );
+                }
+            }
+            // chunk_mode = "length" without a limit is silently a no-op; warn via validation.
+            if bb.chunk_mode == Some(BlueBubblesChunkMode::Length) && bb.text_chunk_limit.is_none()
+            {
+                anyhow::bail!(
+                    "channels_config.bluebubbles.chunk_mode = \"length\" requires text_chunk_limit to be set"
+                );
             }
         }
 

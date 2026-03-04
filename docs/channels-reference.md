@@ -580,7 +580,7 @@ send_read_receipts = true
 # --- Text chunking (optional) ---
 # Maximum Unicode characters per outbound message. Omit to disable chunking.
 # text_chunk_limit = 4000
-# Split strategy: "length" (word-boundary split) | "newline" (split on \n).
+# Split strategy: "length" (Unicode character-count, breaks at whitespace) | "newline" (split on \n).
 # "newline" is self-sufficient without text_chunk_limit.
 # "newline" drops blank lines (consecutive \n); intentional paragraph breaks are collapsed.
 # If splitting yields no non-empty chunks, the full original message is sent as-is.
