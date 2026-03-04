@@ -168,6 +168,16 @@ impl Tool for BlueBubblesSendAttachmentTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        // as_voice marks the message as a voice memo on the iMessage side;
+        // the BB Private API requires the attachment to be an audio file.
+        if as_voice && !mime_type.to_ascii_lowercase().starts_with("audio/") {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("as_voice=true requires an audio/* mime_type (e.g. audio/m4a)".into()),
+            });
+        }
+
         let file_bytes =
             match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_b64) {
                 Ok(b) => b,
