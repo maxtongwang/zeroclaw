@@ -551,7 +551,9 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         })
         .map(Arc::from);
 
-    // BlueBubbles channel (if configured)
+    // BlueBubbles channel (if configured). Propagate construction failure as a
+    // startup error — silently degrading to a runtime 404 is worse than a clear
+    // startup message that directs operators to fix the configuration.
     let bluebubbles_channel: Option<Arc<BlueBubblesChannel>> = config
         .channels_config
         .bluebubbles
@@ -566,12 +568,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
             .map(|ch| Arc::new(ch.with_transcription(config.transcription.clone())))
         })
         .transpose()
-        .map_err(|e| {
-            tracing::error!("Failed to initialize BlueBubbles channel: {e}");
-            e
-        })
-        .ok()
-        .flatten();
+        .map_err(|e| anyhow::anyhow!("Failed to initialize BlueBubbles channel: {e}"))?;
     let bluebubbles_webhook_secret: Option<Arc<str>> = config
         .channels_config
         .bluebubbles
