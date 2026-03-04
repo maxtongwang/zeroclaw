@@ -2380,6 +2380,49 @@ async fn handle_bluebubbles_webhook(
         let _permit = permit; // released when this task completes
         let messages = bb.parse_webhook_payload_with_transcription(&payload).await;
 
+        // Delivery receipt: send immediately for ALL inbound group messages, whether
+        // or not they pass the mention gate.  This shows "Delivered" on the sender's
+        // side as long as ZeroClaw is online.  DM delivery is handled by the OS/iMessage
+        // stack automatically; we only need to fire it explicitly for group chats.
+        {
+            let evt = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let from_me = payload
+                .get("data")
+                .and_then(|d| d.get("isFromMe").or_else(|| d.get("is_from_me")))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if evt == "new-message" && !from_me {
+                // Extract chat GUID from raw payload: try direct field first, then chats array.
+                let data = payload.get("data");
+                let delivery_guid = data
+                    .and_then(|d| {
+                        d.get("chatGuid")
+                            .or_else(|| d.get("chat_guid"))
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                    })
+                    .or_else(|| {
+                        data.and_then(|d| d.get("chats"))
+                            .and_then(|c| c.as_array())
+                            .and_then(|a| a.first())
+                            .and_then(|f| {
+                                f.get("chatGuid")
+                                    .or_else(|| f.get("chat_guid"))
+                                    .or_else(|| f.get("guid"))
+                                    .and_then(|g| g.as_str())
+                                    .filter(|g| !g.is_empty())
+                                    .map(str::to_string)
+                            })
+                    });
+                if let Some(ref guid) = delivery_guid {
+                    if guid.contains(";+;") {
+                        bb.mark_read(guid).await;
+                    }
+                }
+            }
+        }
+
         for msg in &messages {
             tracing::info!(
                 "BlueBubbles iMessage from {}: {}",
@@ -2402,6 +2445,9 @@ async fn handle_bluebubbles_webhook(
             }
 
             let _ = bb.start_typing(&msg.reply_target).await;
+            // Mark the chat as read immediately — mirrors OpenClaw behaviour and ensures
+            // the read receipt reaches the sender even when the outbound send fails.
+            bb.mark_read(&msg.reply_target).await;
             let leak_guard_cfg = gateway_outbound_leak_guard_snapshot(&state_bg);
 
             match run_gateway_chat_with_tools(&state_bg, &msg.content, Some(&session_id)).await {
@@ -2417,8 +2463,6 @@ async fn handle_bluebubbles_webhook(
                         .await
                     {
                         tracing::error!("Failed to send BlueBubbles reply: {e}");
-                    } else {
-                        bb.mark_read(&msg.reply_target).await;
                     }
                 }
                 Err(e) => {
