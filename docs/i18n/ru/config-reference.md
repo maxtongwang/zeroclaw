@@ -17,6 +17,11 @@
 - Названия config keys не переводятся.
 - Точное runtime-поведение определяется английским оригиналом.
 
-## Обновления
+## Обновление (2026-03-03)
 
-- `[channels_config.bluebubbles]`: добавлены `dm_policy`, `group_policy`, `group_allow_from`, `send_read_receipts`, `require_mention_in_groups`, `mention_keyword`. Подробности в английском оригинале.
+- В секции `[agent]` добавлены `allowed_tools` и `denied_tools`.
+  - Если `allowed_tools` не пуст, основному агенту показываются только инструменты из allowlist.
+  - `denied_tools` применяется после allowlist и дополнительно исключает инструменты.
+- Неизвестные элементы `allowed_tools` пропускаются (с debug-логом) и не ломают запуск.
+- Если одновременно заданы `allowed_tools` и `denied_tools`, и после фильтрации не остается исполняемых инструментов, запуск завершается fail-fast с явной ошибкой конфигурации.
+- Полная таблица параметров и пример остаются в английском `config-reference.md` в разделе `[agent]`.

@@ -479,7 +479,7 @@ mod tests {
 id = "{id}"
 version = "1.0.0"
 module_path = "plugins/{id}.wasm"
-wit_packages = ["zeroclaw:tools@1.0.0"]
+wit_packages = ["zeroclaw:tools@1.0.0", "zeroclaw:providers@1.0.0"]
 providers = ["{provider}"]
 
 [[tools]]
@@ -530,6 +530,7 @@ description = "{tool} description"
 
     #[test]
     fn initialize_from_config_applies_updated_plugin_dirs() {
+        let _guard = crate::test_locks::PLUGIN_RUNTIME_LOCK.lock();
         let dir_a = TempDir::new().expect("temp dir a");
         let dir_b = TempDir::new().expect("temp dir b");
         write_manifest(
