@@ -77,6 +77,7 @@ pub mod tools;
 pub(crate) mod tunnel;
 pub mod update;
 pub(crate) mod util;
+pub mod workspace;
 
 pub use config::Config;
 
@@ -496,4 +497,28 @@ Examples:
     },
     /// Flash ZeroClaw firmware to Nucleo-F401RE (builds + probe-rs run)
     FlashNucleo,
+}
+
+/// Workspace management subcommands
+#[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WorkspaceCommands {
+    /// Create a new workspace and print its bearer token
+    Create {
+        /// Human-readable display name for the workspace
+        #[arg(long)]
+        name: String,
+    },
+    /// List all workspaces
+    List,
+    /// Delete a workspace by ID
+    Delete {
+        /// Workspace UUID
+        id: String,
+    },
+    /// Rotate the bearer token for a workspace
+    #[command(name = "token-rotate")]
+    TokenRotate {
+        /// Workspace UUID
+        id: String,
+    },
 }

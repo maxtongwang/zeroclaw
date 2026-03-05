@@ -56,13 +56,17 @@ pub async fn transcribe_audio_local(file_path: &str) -> anyhow::Result<String> {
     }
 
     // Fall back to Python whisper; if it also fails, surface both errors.
-    transcribe_with_python_whisper(file_path).await.map_err(|py_err| {
-        if let Some(cpp) = cpp_err {
-            anyhow::anyhow!("whisper-cli failed ({cpp:#}); Python whisper also failed: {py_err:#}")
-        } else {
-            py_err
-        }
-    })
+    transcribe_with_python_whisper(file_path)
+        .await
+        .map_err(|py_err| {
+            if let Some(cpp) = cpp_err {
+                anyhow::anyhow!(
+                    "whisper-cli failed ({cpp:#}); Python whisper also failed: {py_err:#}"
+                )
+            } else {
+                py_err
+            }
+        })
 }
 
 /// Transcribe using whisper-cli (whisper.cpp). Converts CAF→WAV via ffmpeg first.

@@ -94,13 +94,14 @@ mod tools;
 mod tunnel;
 mod update;
 mod util;
+mod workspace;
 
 use config::Config;
 
 // Re-export so binary modules can use crate::<CommandEnum> while keeping a single source of truth.
 pub use zeroclaw::{
     ChannelCommands, CronCommands, HardwareCommands, IntegrationCommands, MigrateCommands,
-    PeripheralCommands, ServiceCommands, SkillCommands,
+    PeripheralCommands, ServiceCommands, SkillCommands, WorkspaceCommands,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -549,6 +550,24 @@ Examples:
     Config {
         #[command(subcommand)]
         config_command: ConfigCommands,
+    },
+
+    /// Manage multi-tenant workspaces
+    #[command(long_about = "\
+Manage isolated workspaces (multi-tenant mode).
+
+Each workspace has its own bearer token, memory database, identity,
+and channel configuration. Bearer tokens are shown once at creation
+and never stored in plaintext.
+
+Examples:
+  zeroclaw workspace create --name \"Agent A\"
+  zeroclaw workspace list
+  zeroclaw workspace delete <id>
+  zeroclaw workspace token-rotate <id>")]
+    Workspace {
+        #[command(subcommand)]
+        workspace_command: WorkspaceCommands,
     },
 
     /// Generate shell completion script to stdout
@@ -1255,6 +1274,10 @@ async fn main() -> Result<()> {
 
         Commands::Peripheral { peripheral_command } => {
             peripherals::handle_command(peripheral_command.clone(), &config).await
+        }
+
+        Commands::Workspace { workspace_command } => {
+            workspace::handle_command(workspace_command, &config).await
         }
 
         Commands::Config { config_command } => match config_command {
