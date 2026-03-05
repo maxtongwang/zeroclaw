@@ -6787,13 +6787,11 @@ fn print_summary(config: &Config) {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::sync::OnceLock;
     use tempfile::TempDir;
-    use tokio::sync::Mutex;
+    use tokio::sync::MutexGuard;
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    async fn env_lock() -> MutexGuard<'static, ()> {
+        crate::ENV_TEST_LOCK.lock().await
     }
 
     struct EnvVarGuard {
@@ -6834,7 +6832,7 @@ mod tests {
         no_totp: bool,
         home: &Path,
     ) -> Result<Config> {
-        let _env_guard = env_lock().lock().await;
+        let _env_guard = env_lock().await;
         let _workspace_env = EnvVarGuard::unset("ZEROCLAW_WORKSPACE");
         let _config_env = EnvVarGuard::unset("ZEROCLAW_CONFIG_DIR");
 
@@ -7061,7 +7059,7 @@ mod tests {
 
     #[tokio::test]
     async fn quick_setup_respects_zero_claw_workspace_env_layout() {
-        let _env_guard = env_lock().lock().await;
+        let _env_guard = env_lock().await;
         let tmp = TempDir::new().unwrap();
         let workspace_root = tmp.path().join("zeroclaw-data");
         let workspace_dir = workspace_root.join("workspace");
@@ -8627,7 +8625,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_provider_api_key_from_env_prefers_primary_over_fallback() {
-        let _env_guard = env_lock().lock().await;
+        let _env_guard = env_lock().await;
         let _primary = EnvVarGuard::set("STEP_API_KEY", "primary-step-key");
         let _fallback = EnvVarGuard::set("STEPFUN_API_KEY", "fallback-step-key");
 
@@ -8639,7 +8637,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_provider_api_key_from_env_uses_stepfun_fallback_key() {
-        let _env_guard = env_lock().lock().await;
+        let _env_guard = env_lock().await;
         let _unset_primary = EnvVarGuard::unset("STEP_API_KEY");
         let _fallback = EnvVarGuard::set("STEPFUN_API_KEY", "fallback-step-key");
 

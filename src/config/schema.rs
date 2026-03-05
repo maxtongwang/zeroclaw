@@ -9322,7 +9322,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
-    use tokio::sync::{Mutex, MutexGuard};
+    use tokio::sync::MutexGuard;
     use tokio::test;
     use tokio_stream::wrappers::ReadDirStream;
     use tokio_stream::StreamExt;
@@ -11730,8 +11730,7 @@ default_temperature = 0.7
     // ── Environment variable overrides (Docker support) ─────────
 
     async fn env_override_lock() -> MutexGuard<'static, ()> {
-        static ENV_OVERRIDE_TEST_LOCK: Mutex<()> = Mutex::const_new(());
-        ENV_OVERRIDE_TEST_LOCK.lock().await
+        crate::ENV_TEST_LOCK.lock().await
     }
 
     fn clear_proxy_env_test_vars() {

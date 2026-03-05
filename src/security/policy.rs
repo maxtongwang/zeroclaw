@@ -2650,11 +2650,10 @@ mod tests {
             ..SecurityPolicy::default()
         };
 
-        // Path outside workspace should be allowed when workspace_only=false
-        let outside = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/home"))
-            .join("zeroclaw_outside_ws");
+        // Path outside workspace should be allowed when workspace_only=false.
+        // Use a hardcoded path not under /etc or /var so concurrent tests that
+        // modify $HOME cannot cause this assertion to hit the forbidden-paths check.
+        let outside = PathBuf::from("/usr/local/zeroclaw_outside_ws_test");
         assert!(
             p.is_resolved_path_allowed(&outside),
             "workspace_only=false must allow resolved paths outside workspace"

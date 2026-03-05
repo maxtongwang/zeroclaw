@@ -81,6 +81,14 @@ pub mod workspace;
 
 pub use config::Config;
 
+/// Shared mutex for tests that mutate environment variables.
+///
+/// Tests across different modules (e.g. `config::schema` and `onboard::wizard`)
+/// that set `ZEROCLAW_WORKSPACE` or similar env vars must hold this lock to
+/// avoid races when the test suite runs in parallel.
+#[cfg(test)]
+pub(crate) static ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Service management subcommands
 #[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ServiceCommands {

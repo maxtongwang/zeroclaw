@@ -98,6 +98,12 @@ mod workspace;
 
 use config::Config;
 
+/// Shared mutex for tests that mutate environment variables.
+/// Mirrors the same static in lib.rs; both crate roots need it because
+/// `crate::` resolves to different roots in lib vs bin test targets.
+#[cfg(test)]
+static ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 // Re-export so binary modules can use crate::<CommandEnum> while keeping a single source of truth.
 pub use zeroclaw::{
     ChannelCommands, CronCommands, HardwareCommands, IntegrationCommands, MigrateCommands,
