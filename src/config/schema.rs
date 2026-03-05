@@ -14410,4 +14410,50 @@ reserve_percent = 15
             "error should mention group_policy"
         );
     }
+
+    #[test]
+    async fn validation_rejects_bluebubbles_dm_allowlist_with_whitespace_only_senders() {
+        let mut config = Config::default();
+        config.channels_config.bluebubbles = Some(BlueBubblesConfig {
+            server_url: "http://localhost:1234".to_string(),
+            password: String::new(),
+            allowed_senders: vec!["   ".to_string()],
+            webhook_secret: None,
+            ignore_senders: vec![],
+            dm_policy: BlueBubblesDmPolicy::Allowlist,
+            group_policy: BlueBubblesGroupPolicy::Open,
+            group_allow_from: vec![],
+            send_read_receipts: true,
+        });
+        let err = config.validate().expect_err(
+            "allowlist dm_policy with whitespace-only allowed_senders should fail validation",
+        );
+        assert!(
+            err.to_string().contains("dm_policy"),
+            "error should mention dm_policy"
+        );
+    }
+
+    #[test]
+    async fn validation_rejects_bluebubbles_group_allowlist_with_whitespace_only_list() {
+        let mut config = Config::default();
+        config.channels_config.bluebubbles = Some(BlueBubblesConfig {
+            server_url: "http://localhost:1234".to_string(),
+            password: String::new(),
+            allowed_senders: vec![],
+            webhook_secret: None,
+            ignore_senders: vec![],
+            dm_policy: BlueBubblesDmPolicy::Open,
+            group_policy: BlueBubblesGroupPolicy::Allowlist,
+            group_allow_from: vec!["   ".to_string()],
+            send_read_receipts: true,
+        });
+        let err = config.validate().expect_err(
+            "allowlist group_policy with whitespace-only group_allow_from should fail validation",
+        );
+        assert!(
+            err.to_string().contains("group_policy"),
+            "error should mention group_policy"
+        );
+    }
 }

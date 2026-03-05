@@ -483,14 +483,29 @@ async fn handle_google_callback(state: &AppState, query: OAuthCallback) -> Respo
 }
 
 async fn fetch_google_email(access_token: &str) -> Option<String> {
-    let client = oauth_http_client().ok()?;
-    let resp = client
+    let client = match oauth_http_client() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("google userinfo: failed to create HTTP client: {e}");
+            return None;
+        }
+    };
+    let resp = match client
         .get("https://www.googleapis.com/oauth2/v2/userinfo")
         .bearer_auth(access_token)
         .send()
         .await
-        .ok()?;
-
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("google userinfo: request failed: {e}");
+            return None;
+        }
+    };
+    if !resp.status().is_success() {
+        tracing::warn!("google userinfo: non-success status {}", resp.status());
+        return None;
+    }
     let info: serde_json::Value = resp.json().await.ok()?;
     info.get("email")
         .and_then(|v| v.as_str())
