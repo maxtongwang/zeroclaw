@@ -1405,9 +1405,9 @@ impl Channel for BlueBubblesChannel {
 
         // Append effectId if present
         if let Some(ref eid) = effect_id {
-            body.as_object_mut()
-                .expect("serde_json::json!({}) always produces an object")
-                .insert("effectId".into(), serde_json::Value::String(eid.clone()));
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("effectId".into(), serde_json::Value::String(eid.clone()));
+            }
         }
 
         let resp = self

@@ -47,7 +47,6 @@ pub struct OAuthCallback {
 }
 
 /// Query params for initiating OAuth.
-/// Query params for initiating OAuth.
 /// Currently no query params are used; struct is kept for forward compatibility.
 #[derive(Debug, Deserialize)]
 pub struct OAuthStartQuery {}
