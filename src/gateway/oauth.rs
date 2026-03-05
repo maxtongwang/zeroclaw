@@ -50,10 +50,7 @@ pub struct OAuthCallback {
 
 /// Query params for initiating OAuth.
 #[derive(Debug, Deserialize)]
-pub struct OAuthStartQuery {
-    /// Optional redirect URL after successful auth (must be same-origin).
-    pub redirect: Option<String>,
-}
+pub struct OAuthStartQuery {}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -568,10 +565,13 @@ pub async fn handle_auth_revoke(
             .into_response();
     }
 
-    // Revoke Google token if applicable
+    // Best-effort Google token revocation — failure is logged but does not block
+    // local deletion since the local token is always removed below.
     if service == "google" {
         if let Some(token) = read_token(&path).await {
-            let _ = revoke_google_token(&token.access_token).await;
+            if let Err(e) = revoke_google_token(&token.access_token).await {
+                tracing::warn!("Failed to revoke Google OAuth token server-side: {e:#}");
+            }
         }
     }
 
