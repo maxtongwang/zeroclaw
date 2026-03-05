@@ -2827,6 +2827,7 @@ mod tests {
         mode: Option<BlueBubblesChunkMode>,
     ) -> BlueBubblesChannel {
         BlueBubblesChannel::new("http://localhost".into(), "pw".into(), vec![], vec![])
+            .expect("valid test channel")
             .with_chunking(limit, mode)
     }
 
@@ -2922,6 +2923,7 @@ mod tests {
             allowed.into_iter().map(String::from).collect(),
             vec![],
         )
+        .expect("valid test channel")
         .with_mention_gating(require_global, keyword.map(String::from), HashMap::new())
     }
 
@@ -2986,6 +2988,7 @@ mod tests {
             },
         );
         let ch = BlueBubblesChannel::new("http://localhost".into(), "pw".into(), vec![], vec![])
+            .expect("valid test channel")
             .with_mention_gating(true, Some("bot".into()), group_cfgs);
         // Per-group override disables requirement
         assert!(!ch.mention_required_but_missing("iMessage;+;chat1", "hello no keyword"));
@@ -3002,6 +3005,7 @@ mod tests {
             },
         );
         let ch = BlueBubblesChannel::new("http://localhost".into(), "pw".into(), vec![], vec![])
+            .expect("valid test channel")
             .with_mention_gating(false, Some("bot".into()), group_cfgs);
         // Per-group override enables requirement
         assert!(ch.mention_required_but_missing("iMessage;+;chat1", "hello no keyword"));
@@ -3018,6 +3022,7 @@ mod tests {
             },
         );
         let ch = BlueBubblesChannel::new("http://localhost".into(), "pw".into(), vec![], vec![])
+            .expect("valid test channel")
             .with_mention_gating(true, Some("bot".into()), group_cfgs);
         // None inherits global=true → keyword required
         assert!(ch.mention_required_but_missing("iMessage;+;chat1", "hello no keyword"));
