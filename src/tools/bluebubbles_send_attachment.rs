@@ -171,15 +171,6 @@ impl Tool for BlueBubblesSendAttachmentTool {
             });
         }
 
-        // All inputs validated; charge rate-limit only if we are about to mutate.
-        if !self.security.record_action() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Rate limit exceeded: too many actions in the last hour".into()),
-            });
-        }
-
         let file_bytes =
             match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_b64) {
                 Ok(b) => b,
@@ -221,6 +212,15 @@ impl Tool for BlueBubblesSendAttachmentTool {
         }
         if as_voice {
             form = form.text("isAudioMessage", "true");
+        }
+
+        // All inputs decoded and validated; charge rate-limit only immediately before send.
+        if !self.security.record_action() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("Rate limit exceeded: too many actions in the last hour".into()),
+            });
         }
 
         let resp = match self

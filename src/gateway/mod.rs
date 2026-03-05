@@ -2374,8 +2374,8 @@ async fn handle_bluebubbles_webhook(
         }
     };
 
-    // Returning 200 immediately keeps the HTTP lifecycle within the timeout budget while
-    // the background task handles transcription, LLM inference, and reply.
+    // Returning 202 Accepted immediately keeps the HTTP lifecycle within the timeout
+    // budget while the background task handles transcription, LLM inference, and reply.
     let bb = Arc::clone(bluebubbles);
     let state_bg = state.clone();
     tokio::spawn(async move {

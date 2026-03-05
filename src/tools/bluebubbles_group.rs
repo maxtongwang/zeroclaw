@@ -131,17 +131,9 @@ impl Tool for BlueBubblesGroupTool {
 
         let encoded_guid = urlencoding::encode(&chat_guid).into_owned();
 
-        // All common inputs validated; charge rate-limit only before mutation.
-        if !self.security.record_action() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Rate limit exceeded: too many actions in the last hour".into()),
-            });
-        }
-
         match action.as_str() {
             "rename_group" => {
+                // Validate action-specific inputs before charging rate-limit quota.
                 let name = match args.get("display_name").and_then(|v| v.as_str()) {
                     Some(n) if !n.trim().is_empty() => n.trim().to_string(),
                     _ => {
@@ -152,6 +144,14 @@ impl Tool for BlueBubblesGroupTool {
                         })
                     }
                 };
+                // All inputs validated; charge rate-limit only before mutation.
+                if !self.security.record_action() {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some("Rate limit exceeded: too many actions in the last hour".into()),
+                    });
+                }
                 let url = self.api_url(&format!("/api/v1/chat/{encoded_guid}"));
                 let resp = match self
                     .client
@@ -192,6 +192,7 @@ impl Tool for BlueBubblesGroupTool {
             }
 
             "add_participant" => {
+                // Validate action-specific inputs before charging rate-limit quota.
                 let address = match args.get("address").and_then(|v| v.as_str()) {
                     Some(a) if !a.trim().is_empty() => a.trim().to_string(),
                     _ => {
@@ -202,6 +203,14 @@ impl Tool for BlueBubblesGroupTool {
                         })
                     }
                 };
+                // All inputs validated; charge rate-limit only before mutation.
+                if !self.security.record_action() {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some("Rate limit exceeded: too many actions in the last hour".into()),
+                    });
+                }
                 let url = self.api_url(&format!("/api/v1/chat/{encoded_guid}/participants/add"));
                 let resp = match self
                     .client
@@ -252,6 +261,14 @@ impl Tool for BlueBubblesGroupTool {
                         })
                     }
                 };
+                // All inputs validated; charge rate-limit only before mutation.
+                if !self.security.record_action() {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some("Rate limit exceeded: too many actions in the last hour".into()),
+                    });
+                }
                 let url = self.api_url(&format!("/api/v1/chat/{encoded_guid}/participants/remove"));
                 let resp = match self
                     .client
@@ -294,6 +311,14 @@ impl Tool for BlueBubblesGroupTool {
             }
 
             "leave_group" => {
+                // No action-specific params; charge rate-limit before mutation.
+                if !self.security.record_action() {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some("Rate limit exceeded: too many actions in the last hour".into()),
+                    });
+                }
                 let url = self.api_url(&format!("/api/v1/chat/{encoded_guid}/leave"));
                 let resp = match self
                     .client
@@ -389,6 +414,14 @@ impl Tool for BlueBubblesGroupTool {
                     }
                 };
                 let form = reqwest::multipart::Form::new().part("icon", icon_part);
+                // All inputs decoded and validated; charge rate-limit only before send.
+                if !self.security.record_action() {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some("Rate limit exceeded: too many actions in the last hour".into()),
+                    });
+                }
                 let resp = match self
                     .client
                     .post(&url)
