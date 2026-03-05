@@ -557,14 +557,6 @@ pub async fn handle_auth_revoke(
     let dir = oauth_dir(&state);
     let path = token_path(&dir, service);
 
-    if !path.exists() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": format!("{service} is not connected") })),
-        )
-            .into_response();
-    }
-
     // Best-effort Google token revocation — failure is logged but does not block
     // local deletion since the local token is always removed below.
     if service == "google" {
@@ -575,8 +567,15 @@ pub async fn handle_auth_revoke(
         }
     }
 
+    // Remove the token file. Handle NotFound directly to avoid a TOCTOU race
+    // between an existence check and the actual delete.
     match tokio::fs::remove_file(&path).await {
         Ok(_) => Json(json!({ "success": true, "service": service })).into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": format!("{service} is not connected") })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("Failed to delete token: {e}") })),
